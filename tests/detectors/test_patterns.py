@@ -15,7 +15,7 @@ QUEEN_WOULD_STALEMATE = "8/6P1/8/8/8/8/2K5/k7 w - - 0 1"  # g8=Q covers a2: stal
 
 def test_philidor_smothered_mate(detect):
     [e] = detect(SmotheredMate(), "1. Nf7#", PHILIDOR)
-    assert (e.color, e.metadata) == ("w", {"king_square": "h8", "checkers": ["f7"]})
+    assert (e.color, e.metadata) == ("w", {"king_square": "h8", "checkers": ["f7"], "pure": True})
 
 
 def test_black_smothers_white(detect):
@@ -23,7 +23,14 @@ def test_black_smothers_white(detect):
     assert (e.color, e.metadata["king_square"]) == ("b", "h1")
 
 
-def test_knight_mate_with_an_empty_flight_square_is_not_smothered(detect):
+def test_escape_square_covered_by_the_mating_knight_counts(detect):
+    # Nd6# checks e8 and also covers f7, the only square not held by Black's own pieces.
+    [e] = detect(SmotheredMate(), "1. Nd6#", "3qkb2/3pr3/8/1N6/8/8/8/K7 w - - 0 1")
+    assert (e.metadata["king_square"], e.metadata["pure"]) == ("e8", False)
+
+
+def test_escape_square_covered_by_another_piece_is_not_smothered(detect):
+    # Nf7# mates, but g8 is taken away by the other knight on e7, not by the mating knight.
     assert detect(SmotheredMate(), "1. Nf7#", KNIGHT_MATE_OPEN_G8) == []
 
 

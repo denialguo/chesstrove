@@ -15,22 +15,30 @@ def _mated_king(ctx: MoveContext) -> tuple[chess.Board, chess.Color, chess.Squar
 
 
 class SmotheredMate:
-    """A knight gives mate while every on-board square next to the mated king is occupied by that
-    king's own pieces. The knight may be part of a double check."""
+    """A knight gives mate, and each square next to the mated king is either held by the king's own
+    pieces or covered by the mating knight itself: the knight alone does the work, no other piece helps
+    trap the king. `pure` = every neighbouring square is the king's own piece (the textbook picture).
+    The knight may be part of a double check."""
 
     id = "SMOTHERED_MATE"
-    version = 1
+    version = 2  # v2: squares covered by the mating knight itself count (v1 required all to be own pieces)
 
     def detect(self, ctx: MoveContext) -> list[Event]:
         found = _mated_king(ctx)
         if not found:
             return []
         board, mated, king = found
-        if not board.checkers() & board.knights:
+        mating_knights = board.checkers() & board.knights
+        if not mating_knights:
             return []
-        if chess.BB_KING_ATTACKS[king] & ~board.occupied_co[mated]:
-            return []  # some neighbouring square is empty or holds an enemy piece
-        return [event(ctx, self.id, king_square=chess.square_name(king), checkers=checker_squares(board))]
+        knight_cover = 0
+        for square in mating_knights:
+            knight_cover |= chess.BB_KNIGHT_ATTACKS[square]
+        open_squares = chess.BB_KING_ATTACKS[king] & ~board.occupied_co[mated]
+        if open_squares & ~knight_cover:
+            return []  # some escape square is taken away by another piece, not the knight
+        return [event(ctx, self.id, king_square=chess.square_name(king), checkers=checker_squares(board),
+                      pure=not open_squares)]
 
 
 class BackRankMate:
