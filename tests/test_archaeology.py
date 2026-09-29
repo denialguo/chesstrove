@@ -147,8 +147,9 @@ def test_recaptures_and_mates_on_the_board_are_not_only_moves(conn):
 
 
 def test_only_move_keeping_mate(conn):
-    g = game(conn, RUY, top_two={2: [("g1f3", ("mate", 4)), ("d2d4", 900)],       # only mating move: in
-                                 4: [("f1b5", ("mate", 4)), ("d2d4", ("mate", 6))]})  # another mate exists: out
+    g = game(conn, RUY, top_two={2: [("g1f3", ("mate", 4)), ("d2d4", 200)],       # only mate, and only win: in
+                                 4: [("f1b5", ("mate", 4)), ("d2d4", ("mate", 6))],  # another mate exists: out
+                                 6: [("b5a4", ("mate", 4)), ("d2d4", 900)]})         # the runner-up wins anyway: out
     [r] = found(conn, "only_move_keeping_mate")
     assert (r["game"]["id"], r["ply"], r["score"]) == (g, 3, {"name": "mate_in", "value": 4})
 
@@ -163,6 +164,11 @@ def test_unusual_move_is_gap_times_documented_bonuses(conn):
     assert r["score"]["value"] == pytest.approx(r["gap"] * (1 + 0.5 + 0.5), abs=0.002)
     flat = Params(weight_quiet=0, weight_retreat=0, weight_sacrifice=0, weight_underpromotion=0)
     assert found(conn, "unusual_move", flat)[0]["score"]["value"] == r["gap"]
+
+
+def test_parrying_a_mate_threat_is_not_unusual(conn):
+    game(conn, RUY, top_two={6: [("b5a4", 300), ("d2d4", ("mate", -1))]})  # the alternative walks into mate
+    assert found(conn, "unusual_move") == []
 
 
 def test_equal_or_transposing_alternatives_are_not_unusual(conn):
@@ -285,3 +291,20 @@ def test_api_returns_evidence_and_takes_thresholds(dsn, conn, monkeypatch):
     assert client.get("/api/engine-discoveries", params=q).json()["results"] == []
     assert len(client.get("/api/engine-discoveries", params={**q, "not_winning": 0.95}).json()["results"]) == 1
     assert client.get("/api/engine-discoveries", params={**q, "type": "brilliancy"}).status_code == 422
+
+
+def test_a_game_that_stops_inside_the_window_proves_no_sacrifice(conn):
+    # White's queen is taken and White resigns at once: maybe a sacrifice, maybe a trade never finished.
+    game(conn, "1. Qg8+ Rxg8", fen=PHILIDOR, result="0-1", evals={0: ("mate", 2), 1: ("mate", 2), 2: ("mate", 1)})
+    assert found(conn, "material_sacrifice") == []
+
+
+def test_probes_of_proven_mates_target_a_fixed_depth(conn):
+    # A proven mate reports a huge depth almost for free; a probe inheriting it would search the
+    # runner-up line to the node ceiling every time. Mates get PROBE_MATE_DEPTH, others their own depth.
+    from chesstrove import engine
+
+    g = game(conn, RUY, evals={2: ("mate", 3)})
+    conn.execute("UPDATE engine_positions SET depth = 245 WHERE game_id = %s AND position = 2", (g,))
+    depths = db.position_depths(conn, 1, [(g, 2), (g, 4)], engine.PROBE_MATE_DEPTH)
+    assert depths == {(g, 2): engine.PROBE_MATE_DEPTH, (g, 4): 12}

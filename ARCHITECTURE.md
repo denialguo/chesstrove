@@ -296,6 +296,122 @@ Measured: 42,660 candidates (12% of positions) in 270 s on 13 workers.
 CLI: `chesstrove engine labels --type BLUNDER|MISSED_WIN|ONLY_WINNING_MOVE [--player] [--scale]
 [--blunder] [--winning] [--not-winning] [--include-recaptures]`. API: `GET /engine-labels?type=…`.
 
+### Engine archaeology (built)
+
+The engine index answers questions about a whole career, not one game: *what's the biggest win I ever
+threw away, the worst position I came back from, the sacrifices I got right?* ([archaeology.py](src/chesstrove/archaeology.py);
+`GET /api/engine-discoveries?type=…&player=…`; the player page's "record book").
+
+**Principles**
+- **Derived, never stored.** Every discovery is a query over `engine_positions`, `engine_move_probes`, `games`
+  and `moves`. The raw engine results are the durable truth. Every threshold is a `Params` field and an
+  API query parameter, so changing one re-ranks instantly and nothing re-runs Stockfish. The only new
+  engine work is a sparse probe set (below).
+- **Evidence travels with every result:**
+  - the game (players, date, result, and how it ended: the PGN `Termination` tag), the ply and the move;
+  - the positions before and after;
+  - evaluations from the player's side, with mate distances kept: `{"cp": 250}`, `{"mate": 3}` (mates in
+    3), `{"mate": -2}` (is mated in 2), `{"mate": 0}` (mate on the board);
+  - expected scores, the engine's choice (UCI and SAN), and the engine config;
+  - `score {name, value}`, the quantity the result was ranked by.
+- **Engine facts and ChessTrove definitions stay apart:**
+  - Engine facts are evaluations, best lines and mate distances, each naming its config.
+  - Everything else is ChessTrove's definition: what counts as a sacrifice, a comeback, an unusual move.
+  - The table below marks which is which, and each function's docstring states its rule.
+- **Mate-aware ordering.** Expected score maps every forced mate to 1.0 or 0.0, so ties are broken by an
+  ordinal: mate delivered > mate in 1 > mate in 2 > … > any centipawn score > … > mated in 2 > mated in 1.
+- **No "brilliant."** Nothing claims objective brilliance. The unusual-move ranking is a documented,
+  configurable formula over visible features, and the product says "unusual engine-approved moves".
+
+**Shared rules**, each found on the real history:
+- **The engine's own choice is never a mistake.** If the played move was the engine's first choice, a
+  later drop is the engine seeing further one ply later, not the player's error. This applies to
+  `biggest_throw` and `missed_forced_mate`, and now to the `BLUNDER` and `MISSED_WIN` labels: 18 of 9,480
+  BLUNDER rows were this artifact.
+- **Trusted positions.** A position is untrusted when the engine contradicted itself one ply later: its own
+  recommended move was played next and the expected score moved by more than 0.30. Untrusted positions
+  never become a comeback's low point or a lost advantage's high point.
+
+| Type | Engine facts used | ChessTrove definition | Ranked by |
+|---|---|---|---|
+| `biggest_throw` | evaluations before/after the player's move; engine choice | not the engine's choice | expected-score drop; ties: ordinal before ↓, after ↑ |
+| `biggest_comeback` | every position's evaluation (player's side) | games the player won; trusted positions only | worst expected score, ordinal; then games decided on the board before time/abandonment |
+| `lost_advantage` | same | games the player lost | best expected score, ordinal |
+| `only_winning_move` | `top_two` probe: best line ≥ `winning` (0.90), runner-up ≤ `not_winning` (0.60), the player played the best line | not a recapture on the square just captured on; not a mate on the board (that's rule-based) | quiet moves first (a capture that parries a mate threat is an only move nobody misses), then the gap |
+| `underpromotion` | `all_moves` and `vs_queen` probes (see *Underpromotion*) | the two questions kept apart: best move = unique / tied / not / unknown; vs queening = better / equal (incl. transposing) / worse / unknown | unique best, tied, rest; better than queening first |
+| `material_sacrifice` | evaluations before/after; engine choice | see *Sacrifice* below | leads to mate, queen > rook > exchange, deficit, position after |
+| `missed_forced_mate` | mate ≥ 2 before; no mate for the player after | not the engine's choice (mate in 1 is the rule-based `MISSED_MATE_IN_ONE`) | shortest mate first |
+| `longest_mate_found` | a mate score before and after every move of the run | the run ends in the player's mate; not started against a bare king | `min(moves taken, engine mate distance at start)` |
+| `only_move_keeping_mate` | `top_two`: best line is mate ≥ 2, runner-up doesn't mate | the runner-up isn't clearly winning either (< `winning`); without it, this was mostly "the only mate" where a runner-up at +8 to +12 won anyway | mate length, then gap |
+| `unusual_move` | `top_two`: the player played the best line, every alternative ≥ `unusual_min_gap` (0.30) worse | not a recapture or a mate on the board; not a parry: the runner-up doesn't get mated (the real top of the list was king moves whose only competitor walked into mate in 1) | `unusualness` (below) |
+
+**Sacrifice.** Deterministic candidates first, then the engine. The opponent's reply captures the player's
+queen or rook, and over the reply and the next four plies the player never gets back to within the
+threshold of where they stood before the move:
+- **queen:** reply takes the queen, net deficit ≥ 5 throughout (a queen for at most a minor piece);
+- **rook:** reply takes a rook, net deficit ≥ 3;
+- **exchange:** reply takes a rook, net deficit ≥ 2.
+
+Material before the move is derived exactly: the balance after the move, less what it captured and what
+a promotion gained. It works at every ply, including set-up starts.
+
+What is excluded:
+- **Trades.** A queen taken and taken back within two moves never qualifies.
+- **Moves made in check.** A king forced out of a fork doesn't sacrifice the queen.
+- **Games that stop inside the window,** unless they end in the player's mate there. On the real history,
+  ...Qxd2 was answered by resignation when Bxd2 simply traded queens.
+
+"Sound":
+- **Default:** the sacrificing move was the engine's own first choice ("gave up the queen and still had
+  the best move").
+- **With `sacrifice_engine_choice=false`:** the expected score after is within `sacrifice_tolerance`
+  (0.05) of before.
+- **Either way:** at least `sacrifice_floor` (0.50) afterwards, so no desperados.
+- **Why engine choice is the default:** on the real history, tolerance alone passed queens thrown away at
+  +22 in material with mate in one on the board. In a crushing position everything "keeps the win".
+
+Subtypes:
+- `never_recovered`: the deficit lasts to the end of the game.
+- `ends_in_mate`: never recovered, and the player then mates.
+
+What it misses, by design:
+- a sacrifice declined;
+- a piece taken several moves later;
+- a sacrifice made one move before the capture (as with Ng5 allowing the ...Ne2+ fork).
+
+**Longest mate.** A run is the player's moves up to their mating move, each made with a forced mate on
+the board and keeping it. Its length is `min(moves the player took, engine mate distance at the start)`,
+which is conservative on both sides:
+- **The engine side:** at a fixed node budget a mate distance is an upper bound. A shallow search can find
+  a long mate before a short one; one real run showed mate in 13, then mate in 5 one move later.
+- **The player side:** a player who took 10 moves over a mate in 3 carried a mate in 3.
+
+Mating a bare king is technique (K+Q v K), not a find.
+
+**Unusual moves.** `unusualness = gap × (1 + w_quiet·quiet + w_retreat·retreat + w_sacrifice·sacrifice +
+w_underpromotion·underpromotion)`.
+- `gap` is how much worse the best alternative was, in expected score, within one two-line search.
+- The features are deterministic marks of a non-obvious move: quiet (no capture, check or promotion), a
+  retreat toward the player's own side, a sacrifice (definition above), an underpromotion.
+- Default weights are 0.5, 0.5, 1, 1, all parameters. With every weight at 0 the ranking is the gap alone.
+
+**Probe coverage.** Two-line searches (`top_two`) exist only on sparse candidate sets:
+- **Clearly winning positions** where the player played the engine's choice (`engine verify-only-moves`).
+- **Undecided positions** (expected score 0.10–0.90) where the player's move was the engine's choice, it
+  wasn't a recapture or a mate, and there were several legal moves (`engine verify-unusual-moves
+  --player …`): about 27k moves for this user's three accounts.
+
+The unusual-move and only-move lists cover only those positions, and every result's `comparison.search`
+shows the probe budget.
+
+**Performance, measured on 3,689 games / 230k plies:** about 1.5 s per query, pre-optimization numbers in
+parentheses. The shared per-move view runs windows over every ply of the player's games. Three fixes:
+- **An optimization fence (`OFFSET 0`) on the games subquery:** once the planner flattened it, the
+  `Termination` regex ran over the full PGN of every *move*, not every game (6.7 s → 2.1 s).
+- **Expected scores computed after the player filter:** the windows stop Postgres pushing the filter down.
+- **Five `lead()`s under GREATEST/LEAST for the material window,** and a reverse running window for "the
+  rest of the game". A frame ending at `UNBOUNDED FOLLOWING`, or a sliding max, is recomputed per row.
+
 ### Underpromotion: two separate questions
 
 `UNDERPROMOTION` stays a Layer 1 event. The engine layer answers two different questions about it, each
@@ -333,7 +449,15 @@ configs, or the config's depth, capped at 30) **and** carries a node ceiling of 
 deterministic under Threads = 1 with a cleared hash. The result is the deepest iteration in which every line
 reported an exact score (fail-high/low bounds don't count). The budget records all three, e.g.
 `{"depth": 22, "nodes_cap": 280000000, "completed_depth": 21}`, and `completed_depth < depth` says the
-ceiling cut it short. If no iteration covers every line, the probe fails and nothing is stored. A
+ceiling cut it short.
+
+Where the position's own analysis ended on a proven mate, its reported depth (up to 245) is not an
+effort measure. Once a mate is proven the tree collapses and Stockfish reports huge depths almost for
+free. So two-line probes of mate positions target `PROBE_MATE_DEPTH` = 20, deeper than 99% of non-mate
+positions reach at 25k nodes.
+
+Measured: inheriting the cap of 30 sent the runner-up line of ~17.5k mate positions to the node ceiling,
+about 10 s each. The whole probe pass ran at 4 probes/s instead of 75. If no iteration covers every line, the probe fails and nothing is stored. A
 wall-clock watchdog (15 min) exists only for a stuck engine: when it fires, the probe fails and is retried
 next run. It is never a search limit, so no stored result depends on time. `verify-*` commands return every
 failed probe with its game, position and kind.

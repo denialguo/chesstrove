@@ -13,8 +13,6 @@ export function moveLabel(ply: number, san: string, color: "w" | "b") {
   return color === "w" ? `${number}.${san}` : `${number}…${san}`;
 }
 
-/** Win chance as a whole percentage. */
-export const pct = (expected: number) => `${Math.round(expected * 100)}%`;
 
 /** "3+2" / "10 min" / "1 day" from a PGN TimeControl. */
 export function timeControl(tc: string | null) {
@@ -29,14 +27,17 @@ export function timeControl(tc: string | null) {
   return inc ? `${baseLabel}+${inc}` : `${baseLabel} min`;
 }
 
-/** An engine score from the mover's side: "+1.8", "−0.4", "M3" (mover mates), "−M2" (mover gets mated), "#". */
-export function evalText(cp: number | null, mate: number | null, color: "w" | "b") {
-  const sign = color === "w" ? 1 : -1;
-  if (mate !== null) {
-    if (mate === 0) return "#";
-    const pov = mate * sign;
-    return pov > 0 ? `M${pov}` : `−M${-pov}`;
-  }
-  const pov = ((cp ?? 0) * sign) / 100;
-  return `${pov > 0 ? "+" : pov < 0 ? "−" : ""}${Math.abs(pov).toFixed(1)}`;
+/** A player-side evaluation, short: "+1.8", "−0.4", "M3", "−M2", "#". */
+export function evalShort(e: { cp: number } | { mate: number } | null | undefined) {
+  if (!e) return "–";
+  if ("mate" in e) return e.mate === 0 ? "#" : e.mate > 0 ? `M${e.mate}` : `−M${-e.mate}`;
+  const v = e.cp / 100;
+  return `${v > 0 ? "+" : v < 0 ? "−" : ""}${Math.abs(v).toFixed(1)}`;
+}
+
+/** The same in words: "mate in 3", "mated in 2", "+1.8". */
+export function evalWords(e: { cp: number } | { mate: number } | null | undefined) {
+  if (!e) return "unknown";
+  if ("mate" in e) return e.mate === 0 ? "mate on the board" : e.mate > 0 ? `mate in ${e.mate}` : `mated in ${-e.mate}`;
+  return evalShort(e);
 }

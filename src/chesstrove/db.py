@@ -423,16 +423,21 @@ def underpromotion_moves(conn: psycopg.Connection) -> list[tuple[int, int, str]]
     return [(r["game_id"], r["ply"], r["uci"]) for r in rows]
 
 
-def position_depths(conn: psycopg.Connection, config_id: int, positions: list[tuple[int, int]]) -> dict:
-    """(game_id, position) -> the depth the config's normal analysis reached there."""
+def position_depths(conn: psycopg.Connection, config_id: int, positions: list[tuple[int, int]],
+                    mate_depth: int | None = None) -> dict:
+    """(game_id, position) -> the depth the config's normal analysis reached there: a probe's target.
+    `mate_depth`: where that analysis ended on a proven mate, the reported depth isn't an effort measure
+    (once a mate is proven the tree collapses and Stockfish reports up to 245 almost for free), so the
+    target is this instead."""
     if not positions:
         return {}
     rows = conn.execute(
-        """SELECT p.game_id, p.position, p.depth FROM unnest(%s::bigint[], %s::int[]) AS k(game_id, position)
+        """SELECT p.game_id, p.position, p.depth, p.mate FROM unnest(%s::bigint[], %s::int[]) AS k(game_id, position)
            JOIN engine_positions p ON p.config_id = %s AND p.game_id = k.game_id AND p.position = k.position""",
         ([g for g, _ in positions], [p for _, p in positions], config_id),
     ).fetchall()
-    return {(r["game_id"], r["position"]): r["depth"] for r in rows if r["depth"]}
+    return {(r["game_id"], r["position"]): (mate_depth if mate_depth and r["mate"] is not None else r["depth"])
+            for r in rows if r["depth"]}
 
 
 def delete_probes(conn: psycopg.Connection, config_id: int, kinds: tuple[str, ...], player: str | None = None) -> None:

@@ -238,13 +238,14 @@ def only_winning_move(conn, q, p, config):
     search) had exactly one move keeping a clearly winning position (best >= `winning`, runner-up <=
     `not_winning`: a margin, not a hair), and the player played it. Engine fact: the two lines.
     ChessTrove rules: recaptures on the square just captured on don't count (nobody misses those), and
-    delivering mate doesn't count (mate in one is the rule-based layer's). Ranked by the gap between the
-    two lines; quiet moves first among equals."""
+    delivering mate doesn't count (mate in one is the rule-based layer's). Ranked quiet moves first (a
+    capture that parries a mate threat is an only move nobody misses; a quiet one is the rare find),
+    then by the gap between the two lines."""
     join, cols = _top_two_join(p)
     first, second = db._line(p.scale, "tt.results->0", "mv.color"), db._line(p.scale, "tt.results->1", "mv.color")
     rows = _moves(conn, q, p,
                   f"{first} >= %(winning)s AND {second} <= %(not_winning)s AND NOT mv.is_recapture AND NOT mv.is_checkmate",
-                  f"{_gap_sql(p)} DESC, (mv.captured IS NULL AND NOT mv.is_check) DESC, {STABLE}",
+                  f"(mv.captured IS NULL AND NOT mv.is_check) DESC, {_gap_sql(p)} DESC, {STABLE}",
                   join, cols)
     return [_with_runner_up(_move_evidence(r, config, "gap_to_runner_up", round(float(r["line1_exp"] - r["line2_exp"]), 3)), r)
             for r in rows]
@@ -323,7 +324,10 @@ def _sacrifice(r: dict) -> dict | None:
       queen sacrifice     reply takes the queen, net deficit >= 5 throughout (a queen for at most a minor)
       rook sacrifice      reply takes a rook,   net deficit >= 3 throughout (a rook for at most two pawns)
       exchange sacrifice  reply takes a rook,   net deficit >= 2 throughout (a rook for a minor piece)
-    A trade (queen taken, queen taken back within two moves) never qualifies; neither does a move made
+    The whole window must exist unless the game ends in the player's mate within it: a game resigned or
+    lost on time right after the capture proves nothing (a real case: ...Qxd2, resigned, when Bxd2
+    simply traded queens). A trade (queen taken, queen taken back within two moves) never qualifies;
+    neither does a move made
     in check (a king forced out of a fork doesn't sacrifice the queen), nor a piece offered and declined,
     nor a sacrifice that was the move before the one that lost the piece (false negatives, by design). `never_recovered`: the deficit holds to the end
     of the game; `ends_in_mate`: ...and the player then delivers mate."""
@@ -332,6 +336,9 @@ def _sacrifice(r: dict) -> dict | None:
         return None
     if r.get("in_check_before"):  # no free choice: a forked queen lost to a check isn't a sacrifice
         return None
+    mates = bool(r["game_ends_in_mate"] and r["last_mover"] == r["color"])
+    if r["last_ply"] - r["ply"] < 5 and not mates:  # the game stopped inside the window: it proves nothing
+        return None  # (real case: ...Qxd2 answered by resignation, though Bxd2 simply traded queens)
     white = r["color"] == "w"
     best_next = r["wb_max_next5"] if white else -r["wb_min_next5"]  # the best the player gets back, 5 plies
     deficit = before - best_next
@@ -345,7 +352,7 @@ def _sacrifice(r: dict) -> dict | None:
     return {"kind": kind, "piece": "queen" if captured == "Q" else "rook", "reply": r["reply_san"],
             "material_before": before, "material_after_window": best_next, "deficit": deficit,
             "never_recovered": never,
-            "ends_in_mate": bool(never and r["game_ends_in_mate"] and r["last_mover"] == r["color"])}
+            "ends_in_mate": never and mates}
 
 
 def material_sacrifice(conn, q, p, config):
@@ -426,12 +433,15 @@ def longest_mate_found(conn, q, p, config):
 
 
 def only_move_keeping_mate(conn, q, p, config):
-    """The two-line search had a forced mate (in 2 or more) for exactly one move: the runner-up doesn't
-    mate. The player played the mating line. Ranked by the mate's length."""
+    """The two-line search had a forced mate (in 2 or more) for exactly one move, and the runner-up
+    doesn't mate and isn't clearly winning either (< `winning`). The player played the mating line.
+    ChessTrove rule: without the second condition this was mostly 'the only mate' in positions a
+    runner-up at +8 to +12 won anyway. Ranked by the mate's length."""
     join, cols = _top_two_join(p)
     mate1 = "(CASE WHEN mv.color = 'w' THEN 1 ELSE -1 END * (tt.results->0->>'mate')::int)"
     mate2 = "(CASE WHEN mv.color = 'w' THEN 1 ELSE -1 END * (tt.results->1->>'mate')::int)"
-    rows = _moves(conn, q, p, f"{mate1} >= 2 AND ({mate2} IS NULL OR {mate2} <= 0)",
+    second = db._line(p.scale, "tt.results->1", "mv.color")
+    rows = _moves(conn, q, p, f"{mate1} >= 2 AND ({mate2} IS NULL OR {mate2} <= 0) AND {second} < %(winning)s",
                   f"{mate1} DESC, {_gap_sql(p)} DESC, {STABLE}", join, cols + f", {mate1} AS line1_mate")
     return [_with_runner_up(_move_evidence(r, config, "mate_in", r["line1_mate"]), r) for r in rows]
 
@@ -452,12 +462,16 @@ def unusualness(features: dict, gap: float, p: Params) -> float:
 def unusual_move(conn, q, p, config):
     """Moves where the engine's two-line search strongly preferred what the player played: the player's
     move is the best line and every alternative is at least `unusual_min_gap` worse (expected score).
-    Excludes recaptures and mates on the board. Each result lists its features (quiet, retreat, capture,
+    Excludes recaptures, mates on the board, and moves whose runner-up gets mated: those parry a threat
+    (on the real history the top of the list was king moves whose only competitor walked into mate in 1),
+    they don't surprise. Each result lists its features (quiet, retreat, capture,
     check, sacrifice, underpromotion, whether it kept a win or a forced mate) and is ranked by
     `unusualness`. Coverage: only positions with a top_two probe (clearly winning ones, and the ones
     `engine verify-unusual-moves` searched), which each result's `comparison.search` shows."""
     join, cols = _top_two_join(p)
-    rows = _moves(conn, q, p, f"{_gap_sql(p)} >= %(unusual_min_gap)s AND NOT mv.is_recapture AND NOT mv.is_checkmate",
+    mate2 = "(CASE WHEN mv.color = 'w' THEN 1 ELSE -1 END * (tt.results->1->>'mate')::int)"
+    rows = _moves(conn, q, p, f"{_gap_sql(p)} >= %(unusual_min_gap)s AND NOT mv.is_recapture AND NOT mv.is_checkmate "
+                              f"AND NOT coalesce({mate2} < 0, false)",
                   STABLE, join, cols, limit=False)
     scored = []
     for r in rows:

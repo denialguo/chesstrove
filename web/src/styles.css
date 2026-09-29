@@ -300,32 +300,6 @@ button.plunger:hover { background: var(--brass-hi); }
 .specimen__move { font-family: var(--mono); font-weight: 600; font-size: 0.85rem; }
 .specimen__meta { font-size: 0.8rem; color: var(--on-walnut-3); margin-top: -0.2rem; }
 
-.engine { margin-top: var(--space-8); }
-.elist { padding: var(--space-5) 0; border-top: 1px solid var(--walnut-rule); }
-.elist__head { display: grid; grid-template-columns: 4.6rem 1fr; gap: var(--space-4); align-items: baseline; margin-bottom: var(--space-4); padding-inline: var(--space-4); }
-.elist__head .glyph { font-size: 1.6rem; }
-.elist__head h3 { margin: 0; font-size: 1.2rem; }
-.elist__head p { margin: 0.1rem 0 0; color: var(--on-walnut-2); font-size: 0.92rem; }
-.elist__rows { list-style: none; margin: 0; padding: 0; }
-.elist__row {
-  width: 100%; display: grid; grid-template-columns: 9rem 1fr auto 1.25rem; gap: var(--space-4); align-items: center;
-  border: 0; background: transparent; cursor: pointer; text-align: left; padding: 0.6rem var(--space-4); border-radius: 6px;
-  transition: background-color 160ms var(--ease-out);
-}
-.elist__row:hover { background: rgb(255 255 255 / 0.035); }
-.elist__move { font-family: var(--mono); font-weight: 600; font-size: 0.85rem; }
-.elist__swing { font-size: 0.92rem; }
-.elist--bad .elist__swing .num:last-child { color: var(--flag-soft); font-weight: 700; }
-.elist__meta { font-size: 0.82rem; color: var(--on-walnut-3); text-align: right; }
-.elist__chev { color: var(--on-walnut-3); transition: rotate 200ms var(--ease-out); }
-.is-open .elist__chev { rotate: 180deg; }
-.elist__detail { display: grid; grid-template-columns: minmax(0, 20rem) 1fr; gap: var(--space-6); padding: var(--space-4) var(--space-4) var(--space-6); align-items: start; }
-.elist__detail .board { border-radius: 4px; overflow: hidden; box-shadow: 0 0 0 1px var(--walnut-edge); }
-.elist__explain p { margin: 0 0 var(--space-4); color: var(--on-walnut-2); max-width: 44ch; }
-.elist__explain strong { color: var(--on-walnut); font-family: var(--mono); font-weight: 600; font-size: 0.92em; }
-.key { display: inline-block; width: 0.9rem; height: 0.3rem; border-radius: 2px; vertical-align: middle; margin-right: 0.2rem; }
-.key--flag { background: var(--flag); }
-.key--brass { background: var(--brass); }
 
 .textlink {
   display: inline-flex; align-items: center; gap: 0.3rem; font-weight: 600; color: var(--brass-hi);
@@ -340,6 +314,39 @@ button.plunger:hover { background: var(--brass-hi); }
 .empty { padding-top: var(--space-8); max-width: 40rem; }
 .empty h1 { font-family: var(--display); font-weight: 800; text-transform: uppercase; font-size: clamp(2.2rem, 5vw, 3.6rem); line-height: 0.95; margin: 0; }
 .empty p { color: var(--on-walnut-2); }
+
+/* ---------- the record book (engine archaeology) ---------- */
+.records { margin-top: var(--space-8); }
+.records__grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-5); }
+.record {
+  background: var(--walnut-deep); border-radius: 1.2rem; padding: var(--space-5); min-width: 0;
+  display: grid; gap: var(--space-4); align-content: start;
+}
+.record__head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
+.record__head h3 { margin: 0; font-size: 1.1rem; }
+/* the headline sits in an enamel digit plate, like the ratings on the game page */
+.record__value {
+  font-family: var(--display); font-weight: 800; font-size: 1.6rem; line-height: 1; white-space: nowrap;
+  padding: 0.3rem 0.6rem 0.2rem; border-radius: 6px; background: var(--enamel); color: var(--dial);
+  font-variant-numeric: tabular-nums;
+}
+.record__value--bad { color: var(--flag); }
+.record__lead { display: grid; grid-template-columns: minmax(0, 11rem) 1fr; gap: var(--space-4); align-items: start; }
+.record__board { display: block; border-radius: 4px; overflow: hidden; box-shadow: 0 0 0 1px var(--walnut-edge); transition: box-shadow 200ms var(--ease-out); }
+.record__board:hover { box-shadow: 0 0 0 2px var(--brass); }
+.record__text p { margin: 0 0 var(--space-2); color: var(--on-walnut-2); font-size: 0.95rem; }
+.record__meta { font-size: 0.82rem; color: var(--on-walnut-3); }
+.record__text .record__meta { margin-bottom: var(--space-3); }
+.record__rest { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--walnut-rule); }
+.record__row {
+  display: grid; grid-template-columns: 7.5rem auto 1fr; gap: var(--space-3); align-items: baseline;
+  padding: 0.45rem 0.2rem; text-decoration: none; border-bottom: 1px solid rgb(106 70 51 / 0.45);
+  transition: background-color 160ms var(--ease-out);
+}
+.record__row:hover { background: rgb(255 255 255 / 0.035); }
+.record__move { font-family: var(--mono); font-weight: 600; font-size: 0.8rem; }
+.record__row .record__meta { text-align: right; }
+.record .loading { padding-block: var(--space-2); }
 
 /* ---------- game viewer ---------- */
 .game-head { padding-top: var(--space-5); }
@@ -407,7 +414,7 @@ button.plunger:hover { background: var(--brass-hi); }
   .uform--bar .uform__go { grid-column: 2; grid-row: 1 / span 2; }
   .vocab { grid-template-columns: 1fr; gap: var(--space-5); }
   .viewer { grid-template-columns: 1fr; gap: var(--space-5); }
-  .elist__detail { grid-template-columns: 1fr; }
+  .records__grid { grid-template-columns: 1fr; }
 }
 
 @media (max-width: 640px) {
@@ -426,10 +433,11 @@ button.plunger:hover { background: var(--brass-hi); }
   .ledger__def { font-size: 0.85rem; }
   .ledger__panel { padding-inline: 0; }
   .specimens { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-4); }
-  .elist__head { padding-inline: 0; grid-template-columns: 3rem 1fr; }
-  .elist__row { grid-template-columns: 1fr auto 1.25rem; padding-inline: 0.25rem; }
-  .elist__meta { grid-column: 1 / span 2; grid-row: 2; text-align: left; }
-  .elist__detail { padding-inline: 0; }
+  .record { padding: var(--space-4); }
+  .record__lead { grid-template-columns: 1fr; }
+  .record__board { max-width: 16rem; }
+  .record__row { grid-template-columns: 1fr auto; }
+  .record__row .record__meta { grid-column: 1 / -1; text-align: left; }
 }
 
 @media (prefers-reduced-motion: reduce) {

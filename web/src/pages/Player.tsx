@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { ArrowRight, ChevronDown } from "lucide-react";
+import { ChevronDown } from "lucide-react";
 import { Board } from "../components/Board";
 import { Dial } from "../components/Dial";
 import { Digits } from "../components/Digits";
+import { RecordBook } from "../components/RecordBook";
 import { TopBar } from "../components/TopBar";
-import { api, ApiError, PLATFORM_NAME, type EventRow, type LabelRow, type Platform, type PlayerSummary } from "../lib/api";
-import { evalText, formatDate, formatMonth, moveLabel, n, pct, plural } from "../lib/format";
-import { ENGINE_LABELS, MOTIFS, NAMED_MATES, type LabelInfo, type MotifInfo } from "../lib/motifs";
+import { api, ApiError, PLATFORM_NAME, type EventRow, type Platform, type PlayerSummary } from "../lib/api";
+import { formatDate, formatMonth, moveLabel, n, plural } from "../lib/format";
+import { MOTIFS, NAMED_MATES, type MotifInfo } from "../lib/motifs";
 
 const POLL_MS = 2000;
 
@@ -154,7 +155,13 @@ export function Player() {
         </section>
       )}
 
-      <EngineSection summary={summary} platform={platform} username={username} name={name} />
+      {summary.engine?.games_analyzed ? (
+        <RecordBook platform={platform} username={username} name={name} games={summary.games}
+          engine={`${summary.engine.config.engine_name} (${n(summary.engine.config.limit_value)} ${summary.engine.config.limit_kind} a position)`} />
+      ) : (
+        <section className="records"><div className="section-head"><h2>The record book</h2>
+          <p>Stockfish hasn’t analyzed these games yet. The collection above doesn’t need it.</p></div></section>
+      )}
     </Shell>
   );
 }
@@ -227,110 +234,5 @@ function Specimens({ platform, username, type, side }: { platform: Platform; use
         );
       })}
     </ul>
-  );
-}
-
-function EngineSection({ summary, platform, username, name }: { summary: PlayerSummary; platform: Platform; username: string; name: string }) {
-  const e = summary.engine;
-  const analyzed = e?.games_analyzed ?? 0;
-  const [lists, setLists] = useState<Record<string, LabelRow[]> | null>(null);
-  useEffect(() => {
-    if (!analyzed) return;
-    // blunders over-fetched: the ones that are also missed wins get dropped below
-    Promise.all(ENGINE_LABELS.map((l) => api.labels(platform, username, l.type, l.type === "BLUNDER" ? 40 : 12).catch(() => [] as LabelRow[])))
-      .then((all) => setLists(Object.fromEntries(ENGINE_LABELS.map((l, i) => [l.type, all[i]]))));
-  }, [platform, username, analyzed]);
-  // a missed win is usually also a blunder; list it once, under the more specific name
-  const missed = new Set((lists?.MISSED_WIN ?? []).map((r) => `${r.game_id}-${r.ply}`));
-  const quiet = (r: LabelRow) => !r.is_capture && !r.is_check;
-  const rowsFor = (type: string) =>
-    type === "BLUNDER" ? lists?.BLUNDER.filter((r) => !missed.has(`${r.game_id}-${r.ply}`)).slice(0, 12)
-      // quiet finds first, then by how bad the next-best move was: the order the rows read in
-      : type === "ONLY_WINNING_MOVE" ? lists?.[type].slice().sort((a, b) => Number(quiet(b)) - Number(quiet(a)) || Number(a.runner_up_line) - Number(b.runner_up_line))
-      : lists?.[type];
-  return (
-    <section className="engine" aria-labelledby="engine-title">
-      <div className="section-head">
-        <h2 id="engine-title">Stockfish</h2>
-        {analyzed > 0 ? (
-          <p>
-            {e!.config.engine_name} has analyzed {n(analyzed)} of {plural(summary.games, "game")} at {n(e!.config.limit_value)} nodes
-            per position. Win chances use Lichess’s human-calibrated curve. Scores are from the mover’s side; M3 is mate in three.
-          </p>
-        ) : (
-          <p>Stockfish hasn’t analyzed these games yet. The collection above doesn’t need it.</p>
-        )}
-      </div>
-      {analyzed > 0 && ENGINE_LABELS.map((l) => (
-        <EngineList key={l.type} label={l} rows={rowsFor(l.type) ?? null} name={name}
-          note={l.type === "BLUNDER" ? "Missed wins aren’t repeated here." : undefined} />
-      ))}
-    </section>
-  );
-}
-
-function EngineList({ label, rows, name, note }: { label: LabelInfo; rows: LabelRow[] | null; name: string; note?: string }) {
-  const [open, setOpen] = useState<string | null>(null);
-  return (
-    <div className={`elist elist--${label.tone}`}>
-      <div className="elist__head">
-        <span className={`glyph glyph--${label.tone}`}>{label.glyph}</span>
-        <div>
-          <h3>{label.name}</h3>
-          <p>{label.definition}{note && <> {note}</>}</p>
-        </div>
-      </div>
-      {!rows ? <p className="loading">Loading…</p> : rows.length === 0 ? (
-        <p className="muted">None for {name}.</p>
-      ) : (
-        <ol className="elist__rows">
-          {rows.map((r) => {
-            const key = `${r.game_id}-${r.ply}`;
-            const isWhite = r.color === "w";
-            const opponent = isWhite ? r.black : r.white;
-            const good = label.tone === "good";
-            const quiet = !r.is_capture && !r.is_check;
-            const mixed = rows.some((x) => x.is_capture || x.is_check); // the tag only earns its place when it tells rows apart
-            const beforeFen = r.fen_before ?? r.initial_fen ?? "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
-            return (
-              <li key={key} className={open === key ? "is-open" : undefined}>
-                <button type="button" className="elist__row" aria-expanded={open === key} onClick={() => setOpen(open === key ? null : key)}>
-                  <span className="elist__move">{moveLabel(r.ply, r.san, r.color)}</span>
-                  <span className="elist__swing">
-                    {good ? <>{quiet && mixed && <span className="tag">quiet</span>} next best <span className="num">{pct(Number(r.runner_up_line))}</span></>
-                      : <><span className="num">{evalText(r.cp_before, r.mate_before, r.color)}</span> → <span className="num">{evalText(r.cp_after, r.mate_after, r.color)}</span></>}
-                  </span>
-                  <span className="elist__meta">vs {opponent} · {formatDate(r.played_at)}</span>
-                  <ChevronDown className="elist__chev" size={16} aria-hidden="true" />
-                </button>
-                {open === key && (
-                  <div className="elist__detail">
-                    <Board
-                      fen={good ? r.fen_after : beforeFen}
-                      lastMove={good ? r.uci : null}
-                      orientation={isWhite ? "white" : "black"}
-                      arrows={good ? [] : [
-                        { uci: r.uci, brush: "flag" },
-                        ...(r.engine_choice && r.engine_choice !== r.uci ? [{ uci: r.engine_choice, brush: "brass" as const }] : []),
-                      ]}
-                      label={good ? `${r.san}, the only winning move` : `Played ${r.san}; Stockfish preferred ${r.engine_choice}`}
-                    />
-                    <div className="elist__explain">
-                      {good ? (
-                        <p>{name} played <strong>{r.san}</strong>{quiet ? ", a quiet move" : ""}. Win chance with it: <span className="num">{pct(Number(r.best_line))}</span>; with the next-best move, <span className="num">{pct(Number(r.runner_up_line))}</span>.</p>
-                      ) : (
-                        <p><span className="key key--flag" /> Played <strong>{r.san}</strong>: <span className="num">{evalText(r.cp_before, r.mate_before, r.color)}</span> → <span className="num">{evalText(r.cp_after, r.mate_after, r.color)}</span>, win chance <span className="num">{pct(Number(r.expected_before))}</span> → <span className="num">{pct(Number(r.expected_after))}</span>.
-                          {r.engine_choice && r.engine_choice !== r.uci && <> <span className="key key--brass" /> Stockfish’s choice is the brass arrow.</>}</p>
-                      )}
-                      <Link to={`/g/${r.game_id}?ply=${r.ply}${isWhite ? "" : "&o=black"}`} className="textlink">Open the game at this move <ArrowRight size={14} aria-hidden="true" /></Link>
-                    </div>
-                  </div>
-                )}
-              </li>
-            );
-          })}
-        </ol>
-      )}
-    </div>
   );
 }

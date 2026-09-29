@@ -35,6 +35,10 @@ PROBE_MAX_DEPTH = 30  # a proven mate reports depth 245; searching every legal m
 # depth-22 probe stall"). So probes also carry a node ceiling, deterministic under Threads=1 and a cleared
 # hash, and keep the deepest iteration in which every line got an exact score.
 PROBE_NODES_PER_LINE = 20_000_000
+# Where the position's own analysis ended on a proven mate, its reported depth (up to 245) says nothing
+# about effort, so probes there target this depth: deeper than 99% of non-mate positions reach at 25k
+# nodes. (Inheriting 30 from the cap sent every two-line probe of a mate to the node ceiling: ~10 s each.)
+PROBE_MATE_DEPTH = 20
 # A stuck engine, not a slow search: the probe fails (nothing stored) and is retried next run. Never a
 # search limit, so results never depend on wall time.
 PROBE_WATCHDOG_SECONDS = 900.0
@@ -454,7 +458,7 @@ def _probe_setup(conn, config_id, stockfish, engine_factory):
 
 
 def _top_two(conn, config, settings, engine_factory, candidates, workers, progress) -> dict:
-    depths = db.position_depths(conn, config["id"], candidates)
+    depths = db.position_depths(conn, config["id"], candidates, PROBE_MATE_DEPTH)
     by_game: dict[int, list[int]] = {}
     for game_id, position in candidates:
         by_game.setdefault(game_id, []).append(position)
