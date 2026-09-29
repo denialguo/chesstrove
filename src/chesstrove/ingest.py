@@ -140,13 +140,16 @@ def store_items(
     """
     crashed = 0
     for batch in itertools.batched(enumerate(items, start=1), BATCH_SIZE):
-        imported = duplicate = events = 0
+        imported = duplicate = skipped = events = 0
         stored_ids: list[int] = []
         errors: list[dict] = []
         with conn.transaction():
             for index, item in batch:
                 if isinstance(item, ParseFailure):
-                    errors.append({**(context or {}), "index": index, "error": item.error})
+                    if item.skipped:
+                        skipped += 1
+                    else:
+                        errors.append({**(context or {}), "index": index, "error": item.error})
                     continue
                 try:
                     with conn.transaction():  # savepoint: a failure discards only this game
@@ -163,7 +166,7 @@ def store_items(
                     crashed += 1
                     errors.append({**(context or {}), "index": index, "error": f"{type(e).__name__}: {e}"})
             db.mark_analyzed(conn, stored_ids, run.versions)
-            db.record_progress(conn, import_id, len(batch), imported, duplicate, len(errors), errors)
+            db.record_progress(conn, import_id, len(batch), imported, duplicate, len(errors), errors, skipped)
             db.record_run_progress(conn, run.id, imported, events)
     return crashed
 

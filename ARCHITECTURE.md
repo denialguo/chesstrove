@@ -132,7 +132,8 @@ See [schema.sql](src/chesstrove/schema.sql). Tables: `users`, `chess_accounts`, 
   checkpoint can stop before the first one: a game in progress during one import is fetched again (finished)
   by the next. Both sources read their resume state as a union/max over all past imports of the account, so a
   fresh import row never hides progress.
-- **Failure isolation:** a savepoint per game, a transaction per 500 games; failures go to `imports.errors`
+- **Failure isolation:** a savepoint per game, a transaction per 500 games. Unsupported variants are counted in
+  `games_skipped` (intentional, not an error). Other failures go to `imports.errors`
   (capped at 1000) with their index in the input. A game that *raises* while being stored (as opposed to a
   deterministic parse failure) holds the source's resume point, so it's retried next run.
 - **Raw vs derived:** `games`/`moves` never reference `events`. `events(detector_id, detector_version)` +
@@ -154,7 +155,7 @@ Unless a note says otherwise, "mate" means `board_after.is_checkmate()`.
 
 | Detector | Ambiguity | Definition |
 |---|---|---|
-| `UNDERPROMOTION` | Is a forced/irrelevant underpromotion interesting? | Any promotion to N, B or R. Metadata: piece, square, capture, gave_check, gave_mate. No "was it best" judgment; that needs the engine (see below). |
+| `UNDERPROMOTION` (v2) | Is a forced/irrelevant underpromotion interesting? What can be said about queening without an engine? | Any promotion to N, B or R. Metadata: piece, square, capture, gave_check, gave_mate, plus exact facts about queening on the same square instead: `queen_gives_check`, `queen_gives_mate`, `queen_stalemates`. These facts never claim which move was best; that needs the engine (see below). |
 | `PROMOTION_CHECKMATE` | Must the new piece give the check, or does a discovered mate by a promoting pawn count? Queen promotions? | Any promotion move that mates, any piece. Metadata `promoted_piece_checks: bool` separates direct from discovered. |
 | `EN_PASSANT_CHECKMATE` | Discovered mate (the capturing pawn opens a line) vs. direct pawn mate | Any en passant capture that mates. Metadata `checkers` lists the checking squares. |
 | `KING_DELIVERED_MATE` | A king can't give check itself, so this only happens via discovery or castling (the rook mates) | Moving piece is the king (castling included) and the move mates. Metadata `is_castling`, `checkers`. |
@@ -163,13 +164,8 @@ Unless a note says otherwise, "mate" means `board_after.is_checkmate()`.
 | `DOUBLE_DISAMBIGUATED_SAN` | Source SAN may be over-disambiguated by the exporting site | Uses the SAN computed by python-chess (minimal disambiguation), never the PGN text: the SAN names both origin file and rank, e.g. `Qh4e1`. Pawns never qualify. |
 | `MISSED_MATE_IN_ONE` | Played move mates but a different mate existed? Mate available on the final position (resignation/timeout)? Repeated misses on consecutive turns? | Emit only if ≥1 legal mating move exists and the played move doesn't mate. The final position with no move played is not a "missed" move (possible later `MATE_AVAILABLE_AT_END`). Each missed ply is its own event. Metadata: sorted SAN list of mating moves and the move played. For speed, a bitboard pre-filter skips moves that can't possibly check, then `gives_check` is tested before the push-and-test for mate. Verified against brute force on 33k positions. |
 
-Planned Layer 1 additions (definitions to confirm):
-
-| Detector | Ambiguity | Proposed definition |
-|---|---|---|
 | `SMOTHERED_MATE` | Knight-only, or any mate where the king is boxed in by its own pieces? | Mate delivered by a knight (the knight is among `checkers`) and every on-board square adjacent to the mated king is occupied by the mated side's own pieces. Knight + discovered double-check mates still count if the knight checks. |
-| `BACK_RANK_MATE` | Must the escape squares be blocked by own pieces, or is "attacked" enough? Queen or rook only? | Mated king stands on its own back rank; the checker is a rook or queen on that same rank; every square on the next rank adjacent to the king is occupied by the mated side's own pieces. Squares that are only attacked don't qualify. |
-| `UNDERPROMOTION` v2 | What exact facts about the queen alternative are safe to state without an engine? | Adds rule-based facts about queening on the same square instead: `queen_gives_check`, `queen_gives_mate`, `queen_stalemates` (the opponent would have no legal moves and not be in check). These are exact facts. They are **never** used to claim which move was best. |
+| `BACK_RANK_MATE` | Must the escape squares be blocked by own pieces, or is "attacked" enough? Queen or rook only? | Mated king stands on its own back rank; a rook or queen checks it along that rank; every square on the next rank adjacent to the king is occupied by the mated side's own pieces. Squares that are only attacked don't qualify. |
 
 Events store `color` (the side that moved). "Who" is resolved at query time: `events --player NAME` matches
 the event's color against `games.white/black`.
@@ -363,9 +359,8 @@ sustained Layer 1 runs on this laptop already throttle by ~15%).
 2. **Done: canonical games + one-pass reconstruction.**
 3. **Done: persistent moves / positions / facts.**
 4. **Done: deterministic detector framework**, with per-game version tracking and `reanalyze`.
-5. **Done (first set): rare-event detectors.** The 8 above. Next in this phase: `UNDERPROMOTION` v2
-   rule-based queen-alternative facts, `SMOTHERED_MATE`, `BACK_RANK_MATE`, and a `games_skipped` counter so
-   unsupported variants stop showing up as failures.
+5. **Done: rare-event detectors.** The 10 above, including `UNDERPROMOTION` v2's rule-based queen-alternative
+   facts. Unsupported variants are counted in `imports.games_skipped`, not `games_failed`.
 6. **Stockfish analysis subsystem.** `engine_configs`/`engine_runs`/`engine_game_status`/`engine_positions`,
    config identity, a single worker, per-game analysis with move history, resume, cancellation, status,
    and a benchmark on 1,000 real games.

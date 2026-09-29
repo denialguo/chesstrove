@@ -27,6 +27,11 @@ PLATFORM_URLS = [
 class ParseFailure:
     error: str
     pgn: str
+    skipped: bool = False  # intentionally not imported (unsupported variant), as opposed to broken
+
+
+class UnsupportedVariant(ValueError):
+    pass
 
 
 def read_pgn(text: str, source: Source = "pgn") -> Iterator[CanonicalGame | ParseFailure]:
@@ -42,7 +47,7 @@ def read_pgn(text: str, source: Source = "pgn") -> Iterator[CanonicalGame | Pars
         try:
             yield to_canonical(game, raw, source)
         except ValueError as e:
-            yield ParseFailure(str(e), raw)
+            yield ParseFailure(str(e), raw, skipped=isinstance(e, UnsupportedVariant))
 
 
 def read_one(text: str | None, source: Source, ref: str) -> CanonicalGame | ParseFailure:
@@ -60,7 +65,7 @@ def to_canonical(game: chess.pgn.Game, raw: str, source: Source) -> CanonicalGam
         raise ValueError(f"invalid PGN: {game.errors[0]}")
     board = game.board()
     if board.uci_variant != "chess":
-        raise ValueError(f"unsupported variant: {board.uci_variant}")
+        raise UnsupportedVariant(f"unsupported variant: {board.uci_variant}")
 
     h = game.headers
     moves = tuple(m.uci() for m in game.mainline_moves())

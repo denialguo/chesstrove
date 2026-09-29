@@ -75,15 +75,16 @@ def start_import(conn: psycopg.Connection, source: str, source_ref: str, account
 
 def record_progress(
     conn: psycopg.Connection, import_id: int, seen: int = 0, imported: int = 0, duplicate: int = 0,
-    failed: int = 0, errors: list[dict] | None = None,
+    failed: int = 0, errors: list[dict] | None = None, skipped: int = 0,
 ) -> None:
     conn.execute(
         """UPDATE imports SET
              games_seen = games_seen + %s, games_imported = games_imported + %s,
              games_duplicate = games_duplicate + %s, games_failed = games_failed + %s,
+             games_skipped = games_skipped + %s,
              errors = CASE WHEN jsonb_array_length(errors) < %s THEN errors || %s ELSE errors END
            WHERE id = %s""",
-        (seen, imported, duplicate, failed, MAX_STORED_ERRORS, Jsonb(errors or []), import_id),
+        (seen, imported, duplicate, failed, skipped, MAX_STORED_ERRORS, Jsonb(errors or []), import_id),
     )
 
 

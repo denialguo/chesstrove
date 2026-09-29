@@ -72,8 +72,8 @@ def test_month_of():
 def test_import_creates_account_and_stores_games(conn):
     imp = db.get_import(conn, import_chesscom(conn, "Alice", fetch=fake_api(), now=NOW))
     assert (imp["status"], imp["source_ref"]) == ("completed", "alice")
-    assert (imp["games_seen"], imp["games_imported"], imp["games_failed"]) == (5, 4, 1)
-    assert imp["errors"] == [{"month": "2024/02", "index": 2, "error": "unsupported variant: crazyhouse"}]
+    assert (imp["games_seen"], imp["games_imported"], imp["games_failed"], imp["games_skipped"]) == (5, 4, 0, 1)
+    assert imp["errors"] == []  # an unsupported variant is skipped on purpose, not an error
     assert imp["resume_state"] == {"months_done": ["2024/01", "2024/02"]}  # current month never marked done
     account = conn.execute("SELECT * FROM chess_accounts").fetchone()
     assert (account["platform"], account["username"], account["id"]) == ("chesscom", "alice", imp["account_id"])

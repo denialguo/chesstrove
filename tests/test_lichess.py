@@ -77,8 +77,9 @@ def test_export_url():
 def test_import_and_checkpoint(conn):
     api = FakeLichess([lichess_game(1, 1000), lichess_game(2, 2000), lichess_game(3, 3000, variant="horde")])
     imp = db.get_import(conn, import_lichess(conn, "Alice", open_stream=api))
-    assert (imp["status"], imp["source_ref"], imp["games_imported"], imp["games_failed"]) == ("completed", "alice", 2, 1)
-    assert imp["resume_state"] == {"since": 3001}  # a deterministic parse failure doesn't hold the checkpoint back
+    assert (imp["status"], imp["source_ref"], imp["games_imported"], imp["games_failed"], imp["games_skipped"]) == (
+        "completed", "alice", 2, 0, 1)
+    assert imp["resume_state"] == {"since": 3001}  # a skipped variant doesn't hold the checkpoint back
     assert conn.execute("SELECT platform FROM chess_accounts").fetchone()["platform"] == "lichess"
     assert api.since_of(api.urls[0]) == 0
 

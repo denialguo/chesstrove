@@ -68,23 +68,24 @@ def test_reanalyze_skips_up_to_date_games(conn):
 def test_version_bump_makes_games_stale(conn, monkeypatch):
     import_pgn(conn, PGN, "games.pgn")
     missed_before = conn.execute("SELECT id FROM events WHERE type = 'MISSED_MATE_IN_ONE'").fetchone()["id"]
-    monkeypatch.setattr(Underpromotion, "version", 2)
+    bumped = Underpromotion.version + 1
+    monkeypatch.setattr(Underpromotion, "version", bumped)
 
     run = db.get_analysis_run(conn, reanalyze(conn))  # no args: finds what's stale by itself
-    assert run["detector_versions"] == {"UNDERPROMOTION": 2}  # only the changed detector runs
-    assert run["games_processed"] == 2  # both games had UNDERPROMOTION v1 recorded
+    assert run["detector_versions"] == {"UNDERPROMOTION": bumped}  # only the changed detector runs
+    assert run["games_processed"] == 2  # both games had the old UNDERPROMOTION version recorded
     assert conn.execute("SELECT id FROM events WHERE type = 'MISSED_MATE_IN_ONE'").fetchone()["id"] == missed_before
     rows = conn.execute("SELECT type, detector_version FROM events ORDER BY type").fetchall()
-    assert [(r["type"], r["detector_version"]) for r in rows] == [("MISSED_MATE_IN_ONE", 1), ("UNDERPROMOTION", 2)]
+    assert [(r["type"], r["detector_version"]) for r in rows] == [("MISSED_MATE_IN_ONE", 1), ("UNDERPROMOTION", bumped)]
     assert db.get_analysis_run(conn, reanalyze(conn))["games_processed"] == 0  # now up to date
 
 
 def test_reanalyze_single_detector_leaves_others_alone(conn, monkeypatch):
     import_pgn(conn, PGN, "games.pgn")
     missed_before = conn.execute("SELECT id FROM events WHERE type = 'MISSED_MATE_IN_ONE'").fetchone()["id"]
-    monkeypatch.setattr(Underpromotion, "version", 2)
+    monkeypatch.setattr(Underpromotion, "version", Underpromotion.version + 1)
     run = db.get_analysis_run(conn, reanalyze(conn, ["UNDERPROMOTION"]))
-    assert run["detector_versions"] == {"UNDERPROMOTION": 2}
+    assert run["detector_versions"] == {"UNDERPROMOTION": Underpromotion.version}
     assert conn.execute("SELECT id FROM events WHERE type = 'MISSED_MATE_IN_ONE'").fetchone()["id"] == missed_before
 
 
@@ -149,7 +150,7 @@ def test_broken_detector_during_reanalyze_fails_the_run(conn, monkeypatch):
 
 def test_registry_ids_are_unique_and_versioned():
     ids = [d.id for d in detectors.DETECTORS]
-    assert len(ids) == len(set(ids)) == 8
+    assert len(ids) == len(set(ids)) == 10
     assert all(isinstance(d.version, int) and d.version >= 1 for d in detectors.DETECTORS)
     assert all(d.__doc__ for d in detectors.DETECTORS)  # every definition is written down
 

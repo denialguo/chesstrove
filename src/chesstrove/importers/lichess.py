@@ -63,7 +63,7 @@ def is_ongoing(game: dict) -> bool:
 def to_item(game: dict) -> CanonicalGame | ParseFailure:
     ref = f"https://lichess.org/{game.get('id', '?')}"
     if game.get("variant") not in SUPPORTED_VARIANTS:
-        return ParseFailure(f"unsupported variant: {game.get('variant')}", ref)
+        return ParseFailure(f"unsupported variant: {game.get('variant')}", ref, skipped=True)
     item = read_one(game.get("pgn"), "lichess", ref)
     if isinstance(item, CanonicalGame) and "rated" in game:
         item = replace(item, rated=game["rated"])

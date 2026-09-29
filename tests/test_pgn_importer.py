@@ -96,7 +96,7 @@ def test_garbage_and_empty_input():
 
 def test_invalid_fen_header():
     [item] = read_pgn('[SetUp "1"]\n[FEN "not a fen"]\n\n1. e4 *\n')
-    assert isinstance(item, ParseFailure)
+    assert isinstance(item, ParseFailure) and not item.skipped  # broken, not merely unsupported
 
 
 def test_custom_start_position():
@@ -108,7 +108,7 @@ def test_custom_start_position():
 
 def test_unsupported_variant_is_rejected():
     [item] = read_pgn('[Variant "Crazyhouse"]\n[Result "*"]\n\n1. e4 *\n')
-    assert isinstance(item, ParseFailure) and "crazyhouse" in item.error
+    assert isinstance(item, ParseFailure) and "crazyhouse" in item.error and item.skipped
 
 
 def test_chess960_is_supported():

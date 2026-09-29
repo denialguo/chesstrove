@@ -7,6 +7,7 @@ from chesstrove.detectors.checks import DoubleCheck
 from chesstrove.detectors.material import ThreePlusQueens
 from chesstrove.detectors.mates import EnPassantCheckmate, KingDeliveredMate, MissedMateInOne
 from chesstrove.detectors.notation import DoubleDisambiguatedSan
+from chesstrove.detectors.patterns import BackRankMate, SmotheredMate
 from chesstrove.detectors.promotion import PromotionCheckmate, Underpromotion
 
 DETECTORS: tuple[Detector, ...] = (
@@ -18,6 +19,8 @@ DETECTORS: tuple[Detector, ...] = (
     ThreePlusQueens(),
     DoubleDisambiguatedSan(),
     MissedMateInOne(),
+    SmotheredMate(),
+    BackRankMate(),
 )
 
 

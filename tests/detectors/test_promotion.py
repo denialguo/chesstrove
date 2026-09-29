@@ -12,7 +12,8 @@ def test_underpromotion_to_knight_with_check(detect):
     assert (e.type, e.ply, e.color) == ("UNDERPROMOTION", 1, "w")
     assert e.fen == KNIGHT_FORK_PROMO
     assert e.metadata == {"promotion_piece": "knight", "square": "a8", "is_capture": False,
-                          "gave_check": True, "gave_mate": False}
+                          "gave_check": True, "gave_mate": False,
+                          "queen_gives_check": False, "queen_gives_mate": False, "queen_stalemates": False}
 
 
 def test_underpromotion_capture_to_rook(detect):

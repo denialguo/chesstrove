@@ -79,7 +79,7 @@ def test_reanalyze(client):
     r = client.post("/analysis-runs", json={"detectors": ["UNDERPROMOTION"], "all": True})
     assert r.status_code == 202
     run = client.get(f"/analysis-runs/{r.json()['run_id']}").json()
-    assert (run["status"], run["games_processed"], run["detector_versions"]) == ("completed", 2, {"UNDERPROMOTION": 1})
+    assert (run["status"], run["games_processed"], run["detector_versions"]) == ("completed", 2, {"UNDERPROMOTION": 2})
     nothing_stale = client.post("/analysis-runs").json()["run_id"]  # empty body = all detectors, stale only
     assert client.get(f"/analysis-runs/{nothing_stale}").json()["games_processed"] == 0
     assert len(client.get("/analysis-runs").json()) == 3  # import's run + two reanalyses
@@ -87,7 +87,7 @@ def test_reanalyze(client):
 
 def test_detectors(client):
     ids = [d["id"] for d in client.get("/detectors").json()]
-    assert "MISSED_MATE_IN_ONE" in ids and len(ids) == 8
+    assert {"MISSED_MATE_IN_ONE", "SMOTHERED_MATE", "BACK_RANK_MATE"} <= set(ids) and len(ids) == 10
 
 
 def test_lichess_import(client, monkeypatch):

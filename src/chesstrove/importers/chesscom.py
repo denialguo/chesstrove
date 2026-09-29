@@ -54,8 +54,8 @@ def month_of(archive_url: str) -> str:
 def games_in_archive(archive: dict) -> Iterator[CanonicalGame | ParseFailure]:
     for g in archive.get("games", []):
         ref = g.get("url", "")
-        if g.get("rules") not in SUPPORTED_RULES:
-            yield ParseFailure(f"unsupported variant: {g.get('rules')}", ref)
+        if g.get("rules") not in SUPPORTED_RULES:  # includes bughouse, which has no PGN at all
+            yield ParseFailure(f"unsupported variant: {g.get('rules')}", ref, skipped=True)
             continue
         item = read_one(g.get("pgn"), "chesscom", ref)
         if isinstance(item, CanonicalGame):

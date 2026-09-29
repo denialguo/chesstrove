@@ -27,10 +27,14 @@ CREATE TABLE IF NOT EXISTS imports (
     games_imported   int NOT NULL DEFAULT 0,
     games_duplicate  int NOT NULL DEFAULT 0,
     games_failed     int NOT NULL DEFAULT 0,
+    games_skipped    int NOT NULL DEFAULT 0,       -- unsupported variants; intentional, not errors
     errors           jsonb NOT NULL DEFAULT '[]',   -- [{index, error}], capped
     started_at       timestamptz NOT NULL DEFAULT now(),
     finished_at      timestamptz
 );
+
+-- Migrations for databases created before a column existed (CREATE TABLE IF NOT EXISTS won't add it).
+ALTER TABLE imports ADD COLUMN IF NOT EXISTS games_skipped int NOT NULL DEFAULT 0;
 
 CREATE TABLE IF NOT EXISTS games (
     id            bigserial PRIMARY KEY,
