@@ -90,6 +90,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--winning", type=float, default=labels.Thresholds().winning)
     p.add_argument("--workers", type=int, default=engine.default_workers())
     p.add_argument("--stockfish")
+    p = esub.add_parser("verify-unusual-moves",
+                        help="two-line searches for the unusual-move discovery: engine-choice moves in undecided positions (resumable)")
+    p.add_argument("--player", help="only this username's moves (recommended: the set is per player)")
+    p.add_argument("--config", type=int)
+    p.add_argument("--workers", type=int, default=engine.default_workers())
+    p.add_argument("--stockfish")
     args = parser.parse_args(argv)
 
     try:
@@ -156,13 +162,17 @@ def main(argv: list[str] | None = None) -> int:
                         print(e, file=sys.stderr)
                         return 1
                     return 0
-                if args.engine_command == "verify-only-moves":
+                if args.engine_command in ("verify-only-moves", "verify-unusual-moves"):
                     def show(p: dict) -> None:
                         print(f"\r{p['done']:,}/{p['total']:,} positions", end="", file=sys.stderr, flush=True)
                     try:
-                        result = engine.verify_only_winning_moves(conn, args.config, args.winning, args.player,
-                                                                  args.stockfish, args.workers, show,
-                                                                  refresh=args.refresh)
+                        if args.engine_command == "verify-only-moves":
+                            result = engine.verify_only_winning_moves(conn, args.config, args.winning, args.player,
+                                                                      args.stockfish, args.workers, show,
+                                                                      refresh=args.refresh)
+                        else:
+                            result = engine.verify_unusual_moves(conn, args.config, args.player, args.stockfish,
+                                                                 args.workers, show)
                     except (ValueError, FileNotFoundError) as e:
                         print(e, file=sys.stderr)
                         return 1

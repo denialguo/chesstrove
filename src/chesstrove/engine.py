@@ -411,6 +411,31 @@ def verify_only_winning_moves(
     was clearly winning and played the engine's choice. Uses the config's own settings, and refuses a
     binary that reports a different engine, so results stay attributable. Resumable: finished probes are
     skipped next time."""
+    config, settings, engine_factory = _probe_setup(conn, config_id, stockfish, engine_factory)
+    if refresh:
+        db.delete_probes(conn, config["id"], ("top_two",), player)
+    candidates = db.only_winning_move_candidates(conn, config["id"], winning, player)
+    return _top_two(conn, config, settings, engine_factory, candidates, workers, progress)
+
+
+def verify_unusual_moves(
+    conn: psycopg.Connection,
+    config_id: int | None = None,
+    player: str | None = None,
+    stockfish: str | None = None,
+    workers: int = 1,
+    progress: Callable[[dict], None] | None = None,
+    engine_factory: Callable[[], Any] | None = None,
+) -> dict:
+    """The same two-line search for the unusual-move discovery, on a sparse set: the player's moves that
+    matched the engine's choice in undecided positions (db.unusual_move_candidates). Resumable."""
+    config, settings, engine_factory = _probe_setup(conn, config_id, stockfish, engine_factory)
+    candidates = db.unusual_move_candidates(conn, config["id"], player)
+    return _top_two(conn, config, settings, engine_factory, candidates, workers, progress)
+
+
+def _probe_setup(conn, config_id, stockfish, engine_factory):
+    """The config's own settings, and an engine factory whose binary reports the config's engine."""
     config = db.get_engine_config(conn, config_id) if config_id else db.default_engine_config(conn)
     if config is None:
         raise ValueError("no engine analysis yet: run `chesstrove engine analyze` first")
@@ -425,10 +450,10 @@ def verify_only_winning_moves(
     finally:
         with contextlib.suppress(Exception):
             identify.quit()
+    return config, settings, engine_factory
 
-    if refresh:
-        db.delete_probes(conn, config["id"], ("top_two",))
-    candidates = db.only_winning_move_candidates(conn, config["id"], winning, player)
+
+def _top_two(conn, config, settings, engine_factory, candidates, workers, progress) -> dict:
     depths = db.position_depths(conn, config["id"], candidates)
     by_game: dict[int, list[int]] = {}
     for game_id, position in candidates:

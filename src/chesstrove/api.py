@@ -17,7 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from pydantic import BaseModel, Field
 
-from chesstrove import db, detectors, insights, labels
+from chesstrove import archaeology, db, detectors, insights, labels
 from chesstrove.analysis import reanalyze
 from chesstrove.ingest import import_chesscom, import_lichess, import_pgn
 
@@ -200,6 +200,42 @@ def engine_labels(
     instantly."""
     return labels.query(c, type, labels.Thresholds(blunder, winning, not_winning), config, player, limit,
                         scale, include_recaptures, platform)
+
+
+Share = Annotated[float, Query(ge=0, le=1)]
+_P = archaeology.Params()
+
+
+@api.get("/engine-discoveries")
+def engine_discoveries(
+    c: Conn,
+    type: archaeology.Type,
+    player: Annotated[str, Query(min_length=1, max_length=50, pattern=r"^[A-Za-z0-9_-]+$")],
+    platform: Platform | None = None,
+    config: int | None = None,
+    limit: Annotated[int, Query(ge=1, le=200)] = 20,
+    scale: Literal["lichess", "stockfish"] = _P.scale,
+    winning: Share = _P.winning,
+    not_winning: Share = _P.not_winning,
+    sacrifice_engine_choice: bool = _P.sacrifice_engine_choice,
+    sacrifice_tolerance: Share = _P.sacrifice_tolerance,
+    sacrifice_floor: Share = _P.sacrifice_floor,
+    unusual_min_gap: Share = _P.unusual_min_gap,
+    weight_quiet: Annotated[float, Query(ge=0, le=10)] = _P.weight_quiet,
+    weight_retreat: Annotated[float, Query(ge=0, le=10)] = _P.weight_retreat,
+    weight_sacrifice: Annotated[float, Query(ge=0, le=10)] = _P.weight_sacrifice,
+    weight_underpromotion: Annotated[float, Query(ge=0, le=10)] = _P.weight_underpromotion,
+) -> dict:
+    """Engine archaeology: one player's rarest engine-backed moments of one kind, ranked, each with the
+    evidence behind it (game, ply, positions, evaluations from the player's side, the engine's choice,
+    the engine config, and the ranked quantity). Derived from stored results at query time: every
+    threshold is a parameter, nothing re-runs Stockfish. Types and exact definitions: archaeology.py."""
+    params = archaeology.Params(
+        scale=scale, winning=winning, not_winning=not_winning, sacrifice_engine_choice=sacrifice_engine_choice,
+        sacrifice_tolerance=sacrifice_tolerance, sacrifice_floor=sacrifice_floor, unusual_min_gap=unusual_min_gap,
+        weight_quiet=weight_quiet, weight_retreat=weight_retreat, weight_sacrifice=weight_sacrifice,
+        weight_underpromotion=weight_underpromotion)
+    return archaeology.discoveries(c, type, player, platform, config, limit, params)
 
 
 @api.get("/engine-runs")

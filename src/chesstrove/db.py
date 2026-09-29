@@ -435,8 +435,16 @@ def position_depths(conn: psycopg.Connection, config_id: int, positions: list[tu
     return {(r["game_id"], r["position"]): r["depth"] for r in rows if r["depth"]}
 
 
-def delete_probes(conn: psycopg.Connection, config_id: int, kinds: tuple[str, ...]) -> None:
-    conn.execute("DELETE FROM engine_move_probes WHERE config_id = %s AND kind = ANY(%s)", (config_id, list(kinds)))
+def delete_probes(conn: psycopg.Connection, config_id: int, kinds: tuple[str, ...], player: str | None = None) -> None:
+    """`player`: only probes of positions where that username was to move (a scoped refresh never touches
+    anyone else's)."""
+    conn.execute(
+        """DELETE FROM engine_move_probes p USING moves m, games g
+           WHERE p.config_id = %(config)s AND p.kind = ANY(%(kinds)s)
+             AND m.game_id = p.game_id AND m.ply = p.position + 1 AND g.id = p.game_id
+             AND (%(player)s::text IS NULL
+                  OR lower(CASE m.color WHEN 'w' THEN g.white ELSE g.black END) = lower(%(player)s))""",
+        {"config": config_id, "kinds": list(kinds), "player": player})
 
 
 def probe_keys(conn: psycopg.Connection, config_id: int) -> set[tuple[int, int, str]]:
@@ -537,10 +545,16 @@ def engine_label_rows(conn: psycopg.Connection, label: str, config_id: int, blun
                       include_recaptures: bool = False, platform: str | None = None) -> list[dict]:
     first, second = _line(scale, "p.results->0", "mv.color"), _line(scale, "p.results->1", "mv.color")
     extra_join, extra_cols = "", ""
+    # BLUNDER and MISSED_WIN are threshold views over the biggest_throw quantity (archaeology.py), with
+    # its rule: a move that was the engine's own choice is never a mistake (the "drop" is the engine
+    # seeing further one ply later; 18 of 9,480 BLUNDER rows on the real corpus were that artifact).
+    not_engine_choice = "mv.uci IS DISTINCT FROM mv.engine_choice"
     if label == "BLUNDER":
-        where, order = "mv.before - mv.after >= %(blunder)s", "mv.before - mv.after DESC, mv.cp_swing DESC"
+        where = f"mv.before - mv.after >= %(blunder)s AND {not_engine_choice}"
+        order = "mv.before - mv.after DESC, mv.cp_swing DESC"
     elif label == "MISSED_WIN":
-        where, order = "mv.before >= %(winning)s AND mv.after <= %(not_winning)s", "mv.before - mv.after DESC, mv.cp_swing DESC"
+        where = f"mv.before >= %(winning)s AND mv.after <= %(not_winning)s AND {not_engine_choice}"
+        order = "mv.before - mv.after DESC, mv.cp_swing DESC"
     elif label == "ONLY_WINNING_MOVE":
         extra_join = """JOIN engine_move_probes p ON p.config_id = %(config)s AND p.game_id = mv.game_id
                           AND p.position = mv.ply - 1 AND p.kind = 'top_two'"""
@@ -662,9 +676,169 @@ def player_summary(conn: psycopg.Connection, platform: str, username: str) -> di
             "latest_import": latest_import}
 
 
+def unusual_move_candidates(conn: psycopg.Connection, config_id: int, player: str | None,
+                            low: float = 0.10, high: float = 0.90) -> list[tuple[int, int]]:
+    """(game_id, position) for the unusual-move discovery's two-line search: the mover played the
+    engine's choice with more than one legal move, it isn't a recapture or a mate on the board, and the
+    game was undecided (lichess expected score in [low, high); clearly winning positions are
+    only_winning_move_candidates). No top_two probe yet."""
+    li = _expected("lichess", "m.color", "b.score_cp", "b.mate", "b.wdl")
+    rows = conn.execute(
+        f"""SELECT m.game_id, m.ply - 1 AS position
+            FROM moves m
+            JOIN games g ON g.id = m.game_id
+            JOIN engine_positions b ON b.config_id = %(config)s AND b.game_id = m.game_id AND b.position = m.ply - 1
+            LEFT JOIN moves prev ON prev.game_id = m.game_id AND prev.ply = m.ply - 1
+            WHERE m.uci = b.best_uci AND m.legal_moves_before > 1 AND NOT m.is_checkmate
+              AND NOT (m.captured IS NOT NULL AND prev.captured IS NOT NULL AND substr(m.uci, 3, 2) = substr(prev.uci, 3, 2))
+              AND {li} >= %(low)s AND {li} < %(high)s
+              AND (%(player)s::text IS NULL
+                   OR lower(CASE m.color WHEN 'w' THEN g.white ELSE g.black END) = lower(%(player)s))
+              AND NOT EXISTS (SELECT 1 FROM engine_move_probes p WHERE p.config_id = %(config)s
+                              AND p.game_id = m.game_id AND p.position = m.ply - 1 AND p.kind = 'top_two')
+            ORDER BY m.game_id, m.ply""",
+        {"config": config_id, "player": player, "low": low, "high": high},
+    ).fetchall()
+    return [(r["game_id"], r["position"]) for r in rows]
+
+
 def game_engine_positions(conn: psycopg.Connection, game_id: int, config_id: int) -> list[dict]:
     return conn.execute(
         """SELECT position, score_cp, mate, wdl, best_uci, depth FROM engine_positions
            WHERE config_id = %s AND game_id = %s ORDER BY position""",
         (config_id, game_id),
     ).fetchall()
+
+
+# --- engine archaeology: discoveries derived at query time (see archaeology.py) -----------------------
+
+START_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+
+
+def _pov_expected(scale: str, pov: str, stm: str, cp: str, mate: str, wdl: str) -> str:
+    """SQL: `pov`'s expected score (0..1) at a stored position where `stm` is to move. Unlike _expected,
+    which is for the mover right after its move, mate = 0 here depends on who is mated."""
+    return f"CASE WHEN {mate} = 0 THEN CASE WHEN {stm} = {pov} THEN 0.0 ELSE 1.0 END ELSE {_expected(scale, pov, cp, mate, wdl)} END"
+
+
+def _pov_ordinal(pov: str, stm: str, cp: str, mate: str) -> str:
+    """SQL: a total order on evaluations from `pov`'s side, for ranking and tie-breaks where expected
+    scores tie (every forced mate is 1.0 or 0.0): mate delivered > mate in 1 > mate in 2 > ... > any
+    centipawn score > ... > mated in 2 > mated in 1 > mated."""
+    return (f"CASE WHEN {mate} = 0 THEN CASE WHEN {stm} = {pov} THEN -100000 ELSE 100000 END "
+            f"WHEN {mate} IS NOT NULL THEN CASE WHEN ({mate} > 0) = ({pov} = 'w') THEN 100000 - abs({mate}) "
+            f"ELSE -100000 + abs({mate}) END "
+            f"ELSE CASE WHEN {pov} = 'w' THEN {cp} ELSE -{cp} END END")
+
+
+def _piece_value(letter: str) -> str:
+    return f"CASE {letter} WHEN 'P' THEN 1 WHEN 'N' THEN 3 WHEN 'B' THEN 3 WHEN 'R' THEN 5 WHEN 'Q' THEN 9 ELSE 0 END"
+
+
+def _other(color: str) -> str:
+    return f"CASE WHEN {color} = 'w' THEN 'b' ELSE 'w' END"
+
+
+def _player_games(alias: str = "g") -> str:
+    """SQL condition: the game belongs to %(player)s on %(platform)s (either may be NULL = any)."""
+    return (f"(%(platform)s::text IS NULL OR split_part({alias}.source_key, ':', 1) = %(platform)s) "
+            f"AND (%(player)s::text IS NULL OR lower({alias}.white) = lower(%(player)s) OR lower({alias}.black) = lower(%(player)s))")
+
+
+def archaeology_moves_sql(scale: str) -> str:
+    """One row per move of the player's games with the engine's view before and after it, all from the
+    MOVER's side: evaluations (cp/mate, White's POV as stored, plus mover-POV expected score and ordinal),
+    the engine's choice, material balance, and a material window over the next plies for sacrifices.
+    Params: %(config)s, %(player)s (required), %(platform)s. Only the player's own moves come out;
+    the windows still see every ply (the opponent's replies are what a sacrifice window measures)."""
+    stm_after = _other("r.color")
+    wb = "(m.material_white - m.material_black)"  # after this ply, White's side
+    # Expected scores and ordinals are computed after the player filter: the windows below stop
+    # Postgres pushing the filter down, and computing them for the opponent's half too cost ~1 s.
+    return f"""
+      SELECT r.*,
+             {_expected(scale, 'r.color', 'r.cp_before', 'r.mate_before', 'r.wdl_before')} AS exp_before,
+             {_pov_expected(scale, 'r.color', stm_after, 'r.cp_after', 'r.mate_after', 'r.wdl_after')} AS exp_after,
+             {_pov_ordinal('r.color', 'r.color', 'r.cp_before', 'r.mate_before')} AS ord_before,
+             {_pov_ordinal('r.color', stm_after, 'r.cp_after', 'r.mate_after')} AS ord_after,
+             -- forced mate from the mover's side: > 0 mover mates in n, < 0 mover is mated in n
+             CASE WHEN r.mate_before IS NULL THEN NULL WHEN r.color = 'w' THEN r.mate_before ELSE -r.mate_before END AS mover_mate_before,
+             CASE WHEN r.mate_after IS NULL THEN NULL WHEN r.mate_after = 0 THEN 0
+                  WHEN r.color = 'w' THEN r.mate_after ELSE -r.mate_after END AS mover_mate_after
+      FROM (
+        SELECT m.game_id, m.ply, m.color, m.san, m.uci, m.piece, m.captured, m.promotion, m.is_check,
+               m.is_checkmate, m.is_castling, m.legal_moves_before,
+               coalesce(prev.fen_after, g.initial_fen, '{START_FEN}') AS fen_before, m.fen_after,
+               b.score_cp AS cp_before, b.mate AS mate_before, b.wdl AS wdl_before,
+               a.score_cp AS cp_after, a.mate AS mate_after, a.wdl AS wdl_after,
+               b.best_uci AS engine_choice, b.depth AS depth_before,
+               (m.captured IS NOT NULL AND prev.captured IS NOT NULL
+                AND substr(m.uci, 3, 2) = substr(prev.uci, 3, 2)) AS is_recapture,
+               coalesce(prev.is_check, false) AS in_check_before,
+               CASE m.color WHEN 'w' THEN prev.material_black ELSE prev.material_white END AS opp_material_before,
+               -- material balance from the mover's side (P1 N3 B3 R5 Q9). Before the move = after it, less
+               -- what it captured and what a promotion gained: exact at every ply, set-up starts included
+               CASE m.color WHEN 'w' THEN 1 ELSE -1 END * {wb}
+                 - {_piece_value('m.captured')} - CASE WHEN m.promotion IS NULL THEN 0 ELSE {_piece_value('m.promotion')} - 1 END
+                 AS balance_before,
+               CASE m.color WHEN 'w' THEN 1 ELSE -1 END * {wb} AS balance_after,
+               -- the next five plies (reply, and two more moves each), White's side: a sacrifice must hold
+               -- GREATEST/LEAST of five leads: a sliding max/min frame is recomputed per row (5 s)
+               GREATEST({", ".join(f"lead({wb}, {k}) OVER plies" for k in range(1, 6))}) AS wb_max_next5,
+               LEAST({", ".join(f"lead({wb}, {k}) OVER plies" for k in range(1, 6))}) AS wb_min_next5,
+               -- to the end of the game; a reverse running window is linear (a frame ending at
+               -- UNBOUNDED FOLLOWING is recomputed per row: quadratic, 4 s on a 3,700-game history)
+               max({wb}) OVER rest AS wb_max_rest, min({wb}) OVER rest AS wb_min_rest,
+               lead(m.captured) OVER plies AS reply_captured, lead(m.san) OVER plies AS reply_san,
+               g.ply_count AS last_ply, coalesce(lm.is_checkmate, false) AS game_ends_in_mate, lm.color AS last_mover,
+               g.played_at, g.white, g.black, g.result, g.source_key, g.external_id,
+               split_part(g.source_key, ':', 1) AS platform,
+               CASE m.color WHEN 'w' THEN g.white ELSE g.black END AS mover,
+               CASE m.color WHEN 'w' THEN g.black ELSE g.white END AS opponent,
+               g.termination
+        FROM ({_player_games_narrow()}) g
+        JOIN moves m ON m.game_id = g.id
+        LEFT JOIN moves lm ON lm.game_id = g.id AND lm.ply = g.ply_count
+        JOIN engine_positions b ON b.config_id = %(config)s AND b.game_id = m.game_id AND b.position = m.ply - 1
+        JOIN engine_positions a ON a.config_id = %(config)s AND a.game_id = m.game_id AND a.position = m.ply
+        LEFT JOIN moves prev ON prev.game_id = m.game_id AND prev.ply = m.ply - 1
+        WINDOW plies AS (PARTITION BY m.game_id ORDER BY m.ply),
+               rest AS (PARTITION BY m.game_id ORDER BY m.ply DESC ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING)
+      ) r
+      WHERE lower(r.mover) = lower(%(player)s)"""
+
+
+def _player_games_narrow() -> str:
+    """The player's games, only the columns archaeology shows (the raw PGN stays behind: dragging it
+    through window sorts cost seconds), with how the game ended from the PGN's Termination tag."""
+    return f"""SELECT g.id, g.played_at, g.white, g.black, g.result, g.source_key, g.external_id, g.initial_fen,
+                      g.ply_count, substring(g.pgn from '\\[Termination "([^"]*)"\\]') AS termination
+               FROM games g WHERE {_player_games()}
+               -- a fence: evaluate the PGN regex once per game, not once per move after flattening
+               OFFSET 0
+               """
+
+
+def archaeology_positions_sql(scale: str) -> str:
+    """One row per stored position of the player's games, from the PLAYER's side (%(player)s is
+    required): expected score, ordinal, and `trusted`. A position is untrusted when the engine
+    contradicted itself one ply later: its own recommended move was played next and the evaluation
+    moved by more than 0.30 expected score. A comeback 'from -8' must not rest on such a number."""
+    pov = "CASE WHEN lower(g.white) = lower(%(player)s) THEN 'w' ELSE 'b' END"
+    stm = ("CASE WHEN (mod(p.position, 2) = 0) = (split_part(coalesce(g.initial_fen, 'x w'), ' ', 2) = 'w') "
+           "THEN 'w' ELSE 'b' END")
+    return f"""
+        SELECT *, NOT (next_uci IS NOT NULL AND next_uci = best_uci
+                       AND abs(next_exp - exp) > 0.30) AS trusted
+        FROM (
+          SELECT p.game_id, p.position, p.score_cp, p.mate, p.best_uci, pov, stm,
+                 {_pov_expected(scale, 'pov', 'stm', 'p.score_cp', 'p.mate', 'p.wdl')} AS exp,
+                 {_pov_ordinal('pov', 'stm', 'p.score_cp', 'p.mate')} AS ord,
+                 lead({_pov_expected(scale, 'pov', 'stm', 'p.score_cp', 'p.mate', 'p.wdl')})
+                   OVER (PARTITION BY p.game_id ORDER BY p.position) AS next_exp,
+                 nm.uci AS next_uci
+          FROM (SELECT g.*, {pov} AS pov FROM games g WHERE {_player_games()} AND %(player)s::text IS NOT NULL) g
+          JOIN engine_positions p ON p.config_id = %(config)s AND p.game_id = g.id
+          CROSS JOIN LATERAL (SELECT {stm} AS stm) s
+          LEFT JOIN moves nm ON nm.game_id = p.game_id AND nm.ply = p.position + 1
+        ) x"""
