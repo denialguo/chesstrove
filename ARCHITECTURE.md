@@ -387,9 +387,28 @@ nodes/position   ms/position   positions/s   wall    time inside search
 ```
 
 Cost is linear in nodes (~1 µs per node) and pipeline overhead is negligible: wall time ≈ time inside
-search. For a 250k-position history on one worker, that projects to ~40 min at 10k nodes, ~1.7 h at 25k,
-and ~7 h at 100k. These are projections from this measurement, not promises, and the worker pool (Phase 7)
-divides them by however many workers the benchmark shows actually scale.
+search.
+
+**Phase 7 worker scaling (10k nodes, 300 real games / 16,271 positions, M4 Pro: 10 performance + 4
+efficiency cores):**
+
+```text
+workers   speedup   positions/s   wall    time inside search (sum over workers)
+      1      1.0x          97     168 s   167 s
+      2      1.9x         180      90 s   179 s
+      4      3.5x         336      48 s   190 s
+      8      6.0x         584      28 s   214 s
+     10      6.7x         652      25 s   239 s
+     13      7.1x         688      24 s   293 s
+```
+
+Near-linear to ~8 workers. Beyond that each search slows (shared memory bandwidth, then the slower
+efficiency cores), so the gains shrink. Default: CPUs − 1 (13 here). Heavy CPU use is acceptable by design, and
+`--workers 10` keeps 94% of the throughput while leaving the machine responsive. Confirmed at scale: **1,000
+games / 58,671 positions in 78 s (748 positions/s) at 13 workers**, 243 bytes per stored position.
+
+Projection for a 250k-position history at 13 workers: ~6 min at 10k nodes, ~15 min at 25k, ~1 h at
+100k (from the measured linear cost). These are projections, not promises.
 
 ## Reprocessing matrix
 
@@ -416,7 +435,8 @@ divides them by however many workers the benchmark shows actually scale.
 7. **Full-history engine indexing.** *Done:* worker pool (`--workers`) with the worker-count benchmark,
    incremental analysis of new imports (they're simply pending under each config), `engine_move_probes`,
    underpromotion questions A and B, and `events --engine`. *Next:* engine detectors (definitions below,
-   to confirm) and the 1k / 5k / 10k-game runs on a real history.
+   to confirm). Measured on 1,000 real games; since cost is linear per position, 5k/10k runs add no
+   information beyond wall time.
 8. **Queries combining both layers**, as views and `GET` endpoints. For example: underpromotions that were
    best moves, queen promotions that caused stalemate, games with 3 queens that were lost, king-delivered mates
    after an engine mistake, only-winning moves found, biggest blunders, games where I was +5 and lost.
