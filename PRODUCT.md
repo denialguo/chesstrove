@@ -43,7 +43,8 @@ missed wins, blunders) where every engine claim names the engine and settings th
 
 - Motifs (deterministic, versioned): UNDERPROMOTION, PROMOTION_CHECKMATE, EN_PASSANT_CHECKMATE,
   KING_DELIVERED_MATE, DOUBLE_CHECK, THREE_PLUS_QUEENS, DOUBLE_DISAMBIGUATED_SAN, MISSED_MATE_IN_ONE,
-  SMOTHERED_MATE, BACK_RANK_MATE.
+  SMOTHERED_MATE, BACK_RANK_MATE. Plus 19 named mating patterns (Epaulette, Anastasia's, Boden's, Opera,
+  Lolli's, Damiano's, ...) by strict canonical geometry; secondary in the UI, shown only once found.
 - Engine labels (derived from stored evaluations): BLUNDER, MISSED_WIN, ONLY_WINNING_MOVE; underpromotion
   verdicts (best move among all legal moves; better than queening).
 - Usernames are unique per platform only; every player view is scoped to (platform, username).

@@ -7,7 +7,7 @@ import { Digits } from "../components/Digits";
 import { TopBar } from "../components/TopBar";
 import { api, ApiError, PLATFORM_NAME, type EventRow, type LabelRow, type Platform, type PlayerSummary } from "../lib/api";
 import { evalText, formatDate, formatMonth, moveLabel, n, pct, plural } from "../lib/format";
-import { ENGINE_LABELS, MOTIFS, type LabelInfo, type MotifInfo } from "../lib/motifs";
+import { ENGINE_LABELS, MOTIFS, NAMED_MATES, type LabelInfo, type MotifInfo } from "../lib/motifs";
 
 const POLL_MS = 2000;
 
@@ -66,8 +66,14 @@ export function Player() {
     );
   }
 
-  const mineTotal = summary.motifs.reduce((sum, m) => sum + m.mine, 0);
-  const againstTotal = summary.motifs.reduce((sum, m) => sum + m.against, 0);
+  // the dials count the collection only: one mate can carry several pattern names
+  const core = summary.motifs.filter((m) => MOTIFS.some((x) => x.type === m.type));
+  const mineTotal = core.reduce((sum, m) => sum + m.mine, 0);
+  const againstTotal = core.reduce((sum, m) => sum + m.against, 0);
+  const namedFound = NAMED_MATES.flatMap((m) => {
+    const counts = summary.motifs.find((x) => x.type === m.type);
+    return counts ? [{ m, counts }] : [];
+  });
   const name = summary.display_name ?? username;
 
   return (
@@ -133,6 +139,20 @@ export function Player() {
           })}
         </ul>
       </section>
+
+      {namedFound.length > 0 && (
+        <section className="ledger ledger--named" aria-labelledby="named-title">
+          <div className="section-head">
+            <h3 id="named-title">Named mates</h3>
+            <p>The textbook patterns, by their classic geometry. {plural(NAMED_MATES.length - namedFound.length, "other")} haven’t turned up yet.</p>
+          </div>
+          <ul className="ledger__rows">
+            {namedFound.map(({ m, counts }) => (
+              <MotifRow key={m.type} motif={m} mine={counts.mine} against={counts.against} platform={platform} username={username} name={name} />
+            ))}
+          </ul>
+        </section>
+      )}
 
       <EngineSection summary={summary} platform={platform} username={username} name={name} />
     </Shell>

@@ -150,7 +150,7 @@ def test_broken_detector_during_reanalyze_fails_the_run(conn, monkeypatch):
 
 def test_registry_ids_are_unique_and_versioned():
     ids = [d.id for d in detectors.DETECTORS]
-    assert len(ids) == len(set(ids)) == 10
+    assert len(ids) == len(set(ids)) == 29
     assert all(isinstance(d.version, int) and d.version >= 1 for d in detectors.DETECTORS)
     assert all(d.__doc__ for d in detectors.DETECTORS)  # every definition is written down
 

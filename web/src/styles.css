@@ -282,6 +282,10 @@ button.plunger:hover { background: var(--brass-hi); }
 .ledger__row--empty .ledger__def { font-style: italic; color: var(--on-walnut-3); }
 .ledger__chev { position: absolute; right: 0.4rem; top: 50%; translate: 0 -50%; color: var(--on-walnut-3); transition: rotate 200ms var(--ease-out); display: none; }
 .ledger__row--open .ledger__chev { rotate: 180deg; }
+.ledger--named { margin-top: var(--space-7); }
+.ledger--named .section-head h3 { font-family: var(--display); font-weight: 800; text-transform: uppercase; font-size: 1.6rem; line-height: 1; margin: 0; }
+.ledger--named .ledger__count { font-size: 1.7rem; }
+.ledger--named .ledger__summary { padding-block: var(--space-3); }
 .ledger__panel { padding: 0 var(--space-4) var(--space-6); }
 
 .seg { display: inline-flex; gap: 2px; padding: 3px; border-radius: 999px; background: var(--walnut-deep); margin-bottom: var(--space-5); }
@@ -432,3 +436,11 @@ button.plunger:hover { background: var(--brass-hi); }
   *, *::before, *::after { transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; }
   .dial__hand, .plate__hand { animation: none !important; }
 }
+/* every named mate shares the # mark, so the column would say nothing: names carry these rows */
+.ledger--named .ledger__motif { grid-template-columns: 1fr; }
+.ledger--named .ledger__motif .glyph { display: none; }
+/* secondary: two compact columns, definitions only once a row is opened */
+.ledger--named .ledger__rows { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: var(--space-6); align-items: start; }
+.ledger--named .ledger__row:not(.ledger__row--open) .ledger__def { display: none; }
+.ledger--named .ledger__row--open { grid-column: 1 / -1; }
+@media (max-width: 860px) { .ledger--named .ledger__rows { grid-template-columns: 1fr; } }

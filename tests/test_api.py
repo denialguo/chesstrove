@@ -87,7 +87,7 @@ def test_reanalyze(client):
 
 def test_detectors(client):
     ids = [d["id"] for d in client.get("/api/detectors").json()]
-    assert {"MISSED_MATE_IN_ONE", "SMOTHERED_MATE", "BACK_RANK_MATE"} <= set(ids) and len(ids) == 10
+    assert {"MISSED_MATE_IN_ONE", "SMOTHERED_MATE", "BACK_RANK_MATE"} <= set(ids) and len(ids) == 29
 
 
 def test_lichess_import(client, monkeypatch):

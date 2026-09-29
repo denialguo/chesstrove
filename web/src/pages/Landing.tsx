@@ -44,7 +44,7 @@ export function Landing() {
             <p>
               Every move of every game is checked for these. The first list needs nothing but the rules of chess and
               is ready as soon as your games are in. The second comes from Stockfish, and every verdict names the engine
-              and settings behind it.
+              and settings behind it. Mates are also named when they match a textbook pattern, from Anastasia’s to the Opera mate.
             </p>
           </div>
           <div className="vocab__cols">

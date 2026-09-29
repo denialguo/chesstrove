@@ -16,6 +16,32 @@ export const MOTIFS: MotifInfo[] = [
   { type: "MISSED_MATE_IN_ONE", glyph: "#?", name: "Missed mate in one", definition: "Mate in one was on the board and a different move was played." },
 ];
 
+// Named mating patterns: secondary to the collection above, shown only once found. One mate can carry
+// several names. Definitions match backend/detectors/named_mates.py.
+const named = (type: string, name: string, definition: string): MotifInfo => ({ type, glyph: "#", name, definition });
+
+export const NAMED_MATES: MotifInfo[] = [
+  named("EPAULETTE_MATE", "Epaulette mate", "A queen mates head-on; the king's own pieces sit on both its shoulders."),
+  named("SWALLOWS_TAIL_MATE", "Swallow's tail mate", "A guarded queen mates from right beside the king; its own pieces block the two squares behind it."),
+  named("DOVETAIL_MATE", "Dovetail mate", "A queen mates from a diagonal touch; the king's own pieces fill the two squares she can't reach."),
+  named("ANASTASIA_MATE", "Anastasia's mate", "A rook or queen mates along the edge; a knight covers the escapes and the king's own piece blocks the way in."),
+  named("ARABIAN_MATE", "Arabian mate", "A rook mates from beside the king, guarded by a knight that covers the last escape."),
+  named("BODEN_MATE", "Boden's mate", "Two bishops on crossing diagonals mate a king hemmed in by its own pieces."),
+  named("OPERA_MATE", "Opera mate", "A rook mates on the edge beside the king, guarded by a bishop that also takes an escape square."),
+  named("ANDERSSEN_MATE", "Anderssen's mate", "A rook or queen mates from the corner, guarded by a pawn that covers another escape."),
+  named("LOLLI_MATE", "Lolli's mate", "A pawn-guarded queen mates from directly in front of the king (Qg7#)."),
+  named("DAMIANO_MATE", "Damiano's mate", "A pawn-guarded queen mates from diagonally in front of the king (Qh7#)."),
+  named("MORPHY_MATE", "Morphy's mate", "A bishop mates a cornered king down the long diagonal while a rook seals the file."),
+  named("GRECO_MATE", "Greco's mate", "A rook or queen mates a cornered king along the edge; a bishop covers the escape."),
+  named("HOOK_MATE", "Hook mate", "A rook mates, guarded by a knight, guarded by a pawn."),
+  named("CORRIDOR_MATE", "Corridor mate", "A back-rank mate on any other edge: the king's own pieces wall it in."),
+  named("BLACKBURNE_MATE", "Blackburne's mate", "Two bishops and a knight do all the work."),
+  named("RETI_MATE", "Réti's mate", "A bishop mates, guarded by a rook or queen down the file; the king's own pieces do the rest."),
+  named("PILLSBURY_MATE", "Pillsbury's mate", "A rook mates straight down the file while a bishop covers the corner."),
+  named("LADDER_MATE", "Ladder mate", "Two heavy pieces: one mates along the edge, the other seals the next line in."),
+  named("BOX_MATE", "Box mate", "The basic king-and-rook mate."),
+];
+
 export interface LabelInfo { type: string; glyph: string; name: string; definition: string; tone: "good" | "bad" }
 
 export const ENGINE_LABELS: LabelInfo[] = [
@@ -24,4 +50,4 @@ export const ENGINE_LABELS: LabelInfo[] = [
   { type: "BLUNDER", glyph: "??", name: "Blunders", definition: "A move that cost at least 30 points of win chance.", tone: "bad" },
 ];
 
-export const motifInfo = (type: string) => MOTIFS.find((m) => m.type === type);
+export const motifInfo = (type: string) => [...MOTIFS, ...NAMED_MATES].find((m) => m.type === type);

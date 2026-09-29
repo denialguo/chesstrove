@@ -124,7 +124,7 @@ export function Game() {
                   <button key={m.ply} type="button" className={`moves__move ${m.ply === ply ? "is-current" : ""}`}
                     aria-current={m.ply === ply ? "step" : undefined} onClick={() => go(m.ply)}>
                     {m.san}
-                    {eventsByPly.get(m.ply)?.map((t) => <span key={t} className="moves__glyph" title={motifInfo(t)?.name}>{motifInfo(t)?.glyph}</span>)}
+                    {[...new Set(eventsByPly.get(m.ply)?.map((t) => motifInfo(t)?.glyph))].map((g) => <span key={g} className="moves__glyph">{g}</span>)}
                   </button>
                 ))}
               </li>
