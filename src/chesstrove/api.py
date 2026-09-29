@@ -12,7 +12,7 @@ from typing import Annotated, Literal
 from fastapi import BackgroundTasks, Body, Depends, FastAPI, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
-from chesstrove import db, detectors, insights
+from chesstrove import db, detectors, insights, labels
 from chesstrove.analysis import reanalyze
 from chesstrove.ingest import import_chesscom, import_lichess, import_pgn
 
@@ -157,6 +157,21 @@ def get_analysis_run(run_id: int, c: Conn) -> dict:
 def status(c: Conn) -> dict:
     """Games and positions indexed, deterministic coverage, and progress per engine config."""
     return db.status_summary(c, {d.id: d.version for d in detectors.DETECTORS})
+
+
+@app.get("/engine-labels")
+def engine_labels(
+    c: Conn,
+    type: Literal["BLUNDER", "MISSED_WIN", "ONLY_WINNING_MOVE"],
+    player: str | None = None,
+    config: int | None = None,
+    blunder: Annotated[float, Query(gt=0, le=1)] = labels.Thresholds().blunder,
+    winning: Annotated[float, Query(gt=0, le=1)] = labels.Thresholds().winning,
+    not_winning: Annotated[float, Query(ge=0, lt=1)] = labels.Thresholds().not_winning,
+    limit: Limit = 50,
+) -> list[dict]:
+    """Derived from stored evaluations at query time: change a threshold and everything relabels instantly."""
+    return labels.query(c, type, labels.Thresholds(blunder, winning, not_winning), config, player, limit)
 
 
 @app.get("/engine-runs")

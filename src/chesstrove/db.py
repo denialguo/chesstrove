@@ -439,3 +439,78 @@ def engine_facts_for_moves(conn: psycopg.Connection, config_id: int, moves: list
         {"games": [g for g, _ in moves], "plies": [p for _, p in moves], "config": config_id},
     ).fetchall()
     return {(r["game_id"], r["ply"]): r for r in rows}
+
+
+def _expected(wdl: str, color: str) -> str:
+    """SQL: the mover's expected score from a White-POV {win, draw, loss} per-mille array."""
+    return (f"CASE WHEN {color} = 'w' THEN ({wdl}[1] + {wdl}[2] / 2.0) / 1000 "
+            f"ELSE ({wdl}[3] + {wdl}[2] / 2.0) / 1000 END")
+
+
+def _line_wdl(line: str) -> str:
+    return f"(ARRAY[({line}->'wdl'->>0)::int, ({line}->'wdl'->>1)::int, ({line}->'wdl'->>2)::int])"
+
+
+def engine_label_rows(conn: psycopg.Connection, label: str, config_id: int, blunder: float, winning: float,
+                      not_winning: float, player: str | None, limit: int) -> list[dict]:
+    first, second = _line_wdl("p.results->0"), _line_wdl("p.results->1")
+    extra_join, extra_cols = "", ""
+    if label == "BLUNDER":
+        where, order = "mv.before - mv.after >= %(blunder)s", "mv.before - mv.after DESC"
+    elif label == "MISSED_WIN":
+        where, order = "mv.before >= %(winning)s AND mv.after <= %(not_winning)s", "mv.before - mv.after DESC"
+    elif label == "ONLY_WINNING_MOVE":
+        extra_join = """JOIN engine_move_probes p ON p.config_id = %(config)s AND p.game_id = mv.game_id
+                          AND p.position = mv.ply - 1 AND p.kind = 'top_two'"""
+        extra_cols = f""", p.results->1->>'uci' AS runner_up,
+                          {_expected(first, 'mv.color')} AS best_line, {_expected(second, 'mv.color')} AS runner_up_line"""
+        where = f"""jsonb_array_length(p.results) >= 2 AND mv.uci = p.results->0->>'uci'
+                    AND {_expected(first, 'mv.color')} >= %(winning)s AND {_expected(second, 'mv.color')} <= %(not_winning)s"""
+        order = f"{_expected(first, 'mv.color')} - {_expected(second, 'mv.color')} DESC"
+    else:
+        raise ValueError(f"unknown label {label!r}")
+    return conn.execute(
+        f"""WITH mv AS (
+              SELECT m.game_id, m.ply, m.color, m.san, m.uci, b.best_uci AS engine_choice,
+                     {_expected('b.wdl', 'm.color')} AS before,
+                     CASE WHEN a.wdl IS NOT NULL THEN {_expected('a.wdl', 'm.color')}
+                          WHEN a.mate = 0 THEN 1.0   -- the mover delivered mate
+                          ELSE 0.5 END AS after      -- stalemate
+              FROM moves m
+              JOIN engine_positions b ON b.config_id = %(config)s AND b.game_id = m.game_id AND b.position = m.ply - 1
+              JOIN engine_positions a ON a.config_id = %(config)s AND a.game_id = m.game_id AND a.position = m.ply
+            )
+            SELECT %(label)s AS type, mv.game_id, mv.ply, mv.color, mv.san, mv.uci, mv.engine_choice,
+                   round(mv.before, 3) AS expected_before, round(mv.after, 3) AS expected_after,
+                   round(mv.before - mv.after, 3) AS expected_drop {extra_cols},
+                   g.played_at, g.white, g.black, g.result, g.source, g.external_id
+            FROM mv JOIN games g ON g.id = mv.game_id {extra_join}
+            WHERE (%(player)s::text IS NULL
+                   OR lower(CASE mv.color WHEN 'w' THEN g.white ELSE g.black END) = lower(%(player)s))
+              AND {where}
+            ORDER BY {order}
+            LIMIT %(limit)s""",
+        {"label": label, "config": config_id, "blunder": blunder, "winning": winning,
+         "not_winning": not_winning, "player": player, "limit": limit},
+    ).fetchall()
+
+
+def only_winning_move_candidates(conn: psycopg.Connection, config_id: int, winning: float,
+                                 player: str | None) -> list[tuple[int, int]]:
+    """(game_id, position) where the mover was clearly winning, played the engine's choice, had more than
+    one legal move, and no two-line search exists yet: the only places ONLY_WINNING_MOVE can apply."""
+    rows = conn.execute(
+        f"""SELECT m.game_id, m.ply - 1 AS position
+            FROM moves m
+            JOIN games g ON g.id = m.game_id
+            JOIN engine_positions b ON b.config_id = %(config)s AND b.game_id = m.game_id AND b.position = m.ply - 1
+            WHERE m.uci = b.best_uci AND m.legal_moves_before > 1
+              AND {_expected('b.wdl', 'm.color')} >= %(winning)s
+              AND (%(player)s::text IS NULL
+                   OR lower(CASE m.color WHEN 'w' THEN g.white ELSE g.black END) = lower(%(player)s))
+              AND NOT EXISTS (SELECT 1 FROM engine_move_probes p WHERE p.config_id = %(config)s
+                              AND p.game_id = m.game_id AND p.position = m.ply - 1 AND p.kind = 'top_two')
+            ORDER BY m.game_id, m.ply""",
+        {"config": config_id, "winning": winning, "player": player},
+    ).fetchall()
+    return [(r["game_id"], r["position"]) for r in rows]

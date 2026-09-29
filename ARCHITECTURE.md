@@ -81,10 +81,9 @@ tests/                 real Postgres (embedded via pgserver, or $CHESSTROVE_TEST
                        run(): worker pool (spawned processes, one Stockfish each, one game per task),
                        single DB writer, resumable, Ctrl-C safe, newest games first
   insights.py          query-time combination: engine_analysis attached to events (`events --engine`)
+  labels.py            engine-derived labels from stored evaluations; thresholds are query parameters
 scripts/benchmark_engine.py   Stockfish throughput and worker scaling on a real-game sample, in a throwaway DB
 
-planned:
-  engine detectors     engine-backed classifications computed from stored evaluations (no Stockfish)
 ```
 
 The importer "interface" is a convention rather than an ABC: an importer is any iterable of
@@ -213,8 +212,9 @@ identical scores, best moves, node counts and WDL, and a test re-analyzes a game
 
 ### Schema
 
-Built (Phase 6): `engine_configs`, `engine_runs`, `engine_game_status`, `engine_positions`. Planned (Phase 7):
-`engine_move_probes`, `engine_events`.
+Built: `engine_configs`, `engine_runs`, `engine_game_status`, `engine_positions` (Phase 6) and
+`engine_move_probes` (Phase 7). There is no `engine_events` table: engine labels are derived at query time
+(see *Engine-derived labels*), so thresholds can change without rewriting anything.
 
 ```sql
 engine_configs (id, engine_name,                  -- UCI id name, includes the version
@@ -254,27 +254,32 @@ engine_move_probes (config_id, game_id, position, moves text[],  -- restricted s
 - Storage: one `engine_positions` row per position per config. **Measured: 234 bytes per position** including
   the index (MultiPV 1, PV capped at 12 plies), so a 1M-position history is ~0.23 GB per config.
 
-### Engine-backed events
+### Engine-derived labels (built)
 
-Proposed definitions (to confirm). All from the mover's point of view, using **expected score** =
-(W + D/2) / 1000 from Stockfish's own WDL model. That's scale-robust in a way raw centipawns aren't: +3 → +6
-matters much less than 0 → +3. Mate scores map to 1 or 0.
+Labels are **derived at query time** from stored evaluations ([labels.py](src/chesstrove/labels.py)).
+Thresholds are parameters, not stored state: `--blunder 0.25` relabels the whole history instantly and
+never re-runs Stockfish.
 
-| Detector | Proposed definition |
+All labels use **expected score** from the mover's point of view: (W + D/2) / 1000 from Stockfish's own WDL
+model. Delivering mate is 1.0 and stalemate is 0.5. It's scale-robust in a way raw centipawns aren't: +3 → +6
+barely moves it, 0 → +3 moves it a lot. Thresholds are a first calibration, to be tuned against real results.
+
+| Label | Definition (defaults) |
 |---|---|
-| `BLUNDER` | Expected score drops by ≥ 0.30 (the conventional blunder band, e.g. Lichess's win-% scale). Metadata: before/after, best move. |
-| `MISSED_WIN` | Before the move the mover was winning (expected ≥ 0.90, or a forced mate); after it they aren't (≤ 0.60). Includes missed forced mates beyond mate-in-1. |
-| `ONLY_WINNING_MOVE` | Needs MultiPV ≥ 2: the best line is winning (≥ 0.90), the second-best isn't (≤ 0.60), and the played move is the best one. Unknowable under MultiPV 1, so such configs don't emit it. |
+| `BLUNDER` | expected score before − after ≥ 0.30 |
+| `MISSED_WIN` | before ≥ 0.90 (clearly winning, including forced mates) and after ≤ 0.60 |
+| `ONLY_WINNING_MOVE` | the best line ≥ 0.90, the second-best line ≤ 0.60, and the mover played the best line |
 
-"Biggest blunders of my career" and "games where I was +5 and lost" are queries (sorting and filtering stored
-evaluations), not detectors.
+`ONLY_WINNING_MOVE` needs the second-best line, which a MultiPV-1 history doesn't have. Rather than paying
+MultiPV 2 on every position, it's two-stage: `chesstrove engine verify-only-moves` runs a `top_two` probe
+(MultiPV 2, 2× the per-position budget, WDL per line) **only** where it can apply: the mover was clearly
+winning, played the engine's choice, and had more than one legal move. It uses the config's own settings, and
+refuses a binary that reports a different engine. It's resumable. The label is then a query over those probes,
+so its thresholds are adjustable too.
 
-Classifications like BLUNDER, MISSED_WIN or ONLY_WINNING_MOVE are **engine detectors**. They're
-versioned functions of stored evaluations and never run Stockfish. Their output goes to
-`engine_events (config_id, detector_id, detector_version, game_id, ply, type, color, metadata)`, separate
-from `events`. Changing a threshold means bumping the engine detector's version and recomputing from stored
-evaluations in seconds. A new Stockfish version or depth means a new config, which is analyzed and then
-classified. Deterministic `events` never carry engine data.
+CLI: `chesstrove engine labels --type BLUNDER|MISSED_WIN|ONLY_WINNING_MOVE [--player] [--blunder] [--winning]
+[--not-winning]`. API: `GET /engine-labels?type=…`. "Biggest blunders of my career" is `BLUNDER`
+sorted by drop (the default order).
 
 ### Underpromotion: two separate questions
 
@@ -451,9 +456,9 @@ Projection for a 250k-position history at 13 workers: ~6 min at 10k nodes, ~15 m
    `GET /status`, and a benchmark (60 real games at three node limits; the 1k/5k/10k runs come with the pool).
 7. **Full-history engine indexing.** *Done:* worker pool (`--workers`) with the worker-count benchmark,
    incremental analysis of new imports (they're simply pending under each config), `engine_move_probes`,
-   underpromotion questions A and B, and `events --engine`. *Next:* engine detectors (definitions below,
-   to confirm). Measured on 1,000 real games; since cost is linear per position, 5k/10k runs add no
-   information beyond wall time.
+   underpromotion questions A and B, `events --engine`, and engine-derived labels (BLUNDER, MISSED_WIN,
+   and two-stage ONLY_WINNING_MOVE), relabelable without re-running Stockfish. Measured on 1,000 real games;
+   since cost is linear per position, 5k/10k runs add no information beyond wall time.
 8. **Queries combining both layers**, as views and `GET` endpoints. For example: underpromotions that were
    best moves, queen promotions that caused stalemate, games with 3 queens that were lost, king-delivered mates
    after an engine mistake, only-winning moves found, biggest blunders, games where I was +5 and lost.

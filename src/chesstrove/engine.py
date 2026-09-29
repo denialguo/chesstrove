@@ -66,10 +66,11 @@ class Probe:
     them), so their scores are directly comparable. Kinds:
       vs_queen   {played underpromotion, queening on the same square}
       all_moves  every legal move: the only basis for claiming a move is the best one
+      top_two    the two best lines (MultiPV 2): is there exactly one winning move?
     """
 
     position: int
-    kind: Literal["vs_queen", "all_moves"]
+    kind: Literal["vs_queen", "all_moves", "top_two"]
     moves: tuple[str, ...]
     results: tuple[dict, ...]  # ranked [{uci, score_cp, mate}], White's POV; one per move when complete
     budget: dict  # {"nodes": total} or {"depth": d}, as actually searched
@@ -80,6 +81,13 @@ class GameAnalysis:
     game_id: int
     positions: list[PositionResult]
     probes: list[Probe]
+    seconds: float
+
+
+@dataclass(frozen=True, slots=True)
+class ProbeResult:
+    game_id: int
+    probe: Probe
     seconds: float
 
 
@@ -145,23 +153,29 @@ def probe_requests(game: CanonicalGame) -> list[tuple[int, str, tuple[str, ...] 
 
 
 def run_probe(engine: Any, settings: EngineSettings, game: CanonicalGame, position: int,
-              kind: Literal["vs_queen", "all_moves"], moves: tuple[str, ...] | None) -> Probe:
-    """Deliberately expensive and only used for rare moves. With a node limit, the budget is the config's
-    per-position nodes x the number of moves, so each move gets about the normal per-position effort;
-    with a depth limit, every line is searched to that depth."""
+              kind: Literal["vs_queen", "all_moves", "top_two"], moves: tuple[str, ...] | None = None) -> Probe:
+    """Deliberately more expensive than a normal position and only used where it's needed. With a node
+    limit the budget is the config's per-position nodes x the number of lines, so each line gets about
+    the normal per-position effort; with a depth limit, every line is searched to that depth."""
     board = start_board(game)
     for uci in game.moves_uci[:position]:
         board.push_uci(uci)
-    root = [board.parse_uci(m) for m in moves] if moves else list(board.legal_moves)
+    if kind == "top_two":
+        root, lines = None, min(2, board.legal_moves.count())
+    else:
+        root = [board.parse_uci(m) for m in moves] if moves else list(board.legal_moves)
+        lines = len(root)
     if settings.limit_kind == "nodes":
-        limit, budget = chess.engine.Limit(nodes=settings.limit_value * len(root)), {"nodes": settings.limit_value * len(root)}
+        limit, budget = chess.engine.Limit(nodes=settings.limit_value * lines), {"nodes": settings.limit_value * lines}
     else:
         limit, budget = settings.limit(), {"depth": settings.limit_value}
     # A fresh game token clears the hash, so probes never influence (or depend on) the position results.
-    infos = engine.analyse(board, limit, multipv=len(root), game=object(), info=INFO, root_moves=root)
-    results = tuple({"uci": i["pv"][0].uci(), "score_cp": i["score"].white().score(), "mate": i["score"].white().mate()}
+    infos = engine.analyse(board, limit, multipv=lines, game=object(), info=INFO, root_moves=root)
+    results = tuple({"uci": i["pv"][0].uci(), "score_cp": i["score"].white().score(), "mate": i["score"].white().mate(),
+                     "wdl": list(i["wdl"].white()) if "wdl" in i else None}
                     for i in infos if i.get("pv"))
-    return Probe(position, kind, tuple(m.uci() for m in root), results, budget)
+    moves_searched = tuple(m.uci() for m in root) if root else tuple(r["uci"] for r in results)
+    return Probe(position, kind, moves_searched, results, budget)
 
 
 class Analyzer:
@@ -183,6 +197,16 @@ class Analyzer:
             return GameFailure(game_id, f"{type(e).__name__}: {e}")
         return GameAnalysis(game_id, positions, probes, time.perf_counter() - t)
 
+    def probe(self, game_id: int, game: CanonicalGame, position: int, kind: str) -> ProbeResult | GameFailure:
+        t = time.perf_counter()
+        try:
+            probe = run_probe(self.engine, self.settings, game, position, kind)
+        except chess.engine.EngineError as e:
+            self.close()
+            self.engine = self.factory()
+            return GameFailure(game_id, f"{type(e).__name__}: {e}")
+        return ProbeResult(game_id, probe, time.perf_counter() - t)
+
     def close(self) -> None:
         with contextlib.suppress(Exception):  # after Ctrl-C the engine may already be gone
             self.engine.quit()
@@ -199,8 +223,14 @@ def _init_worker(factory: Callable[[], Any], settings: EngineSettings) -> None:
     _worker = Analyzer(factory, settings)
 
 
-def _work(task: tuple[int, CanonicalGame]) -> GameAnalysis | GameFailure:
-    return _worker(*task)
+def _work(task: tuple) -> GameAnalysis | ProbeResult | GameFailure:
+    return _dispatch(_worker, task)
+
+
+def _dispatch(analyzer: Analyzer, task: tuple) -> GameAnalysis | ProbeResult | GameFailure:
+    """Tasks are ("game", game_id, game) or ("probe", game_id, game, position, kind)."""
+    kind, *args = task
+    return analyzer(*args) if kind == "game" else analyzer.probe(*args)
 
 
 def default_workers() -> int:
@@ -240,7 +270,8 @@ def run(
     started = time.perf_counter()
     status = "failed"
     try:
-        for outcome in _outcomes(conn, game_ids, engine_factory, settings, workers):
+        tasks = (("game", game_id, game) for game_id, game in _games(conn, game_ids))
+        for outcome in _parallel(tasks, engine_factory, settings, workers):
             if isinstance(outcome, GameFailure):
                 db.record_engine_error(conn, run_id, {"game_id": outcome.game_id, "error": outcome.error})
                 continue
@@ -272,14 +303,14 @@ def _games(conn: psycopg.Connection, game_ids: list[int]) -> Iterator[tuple[int,
                 yield game_id, db.game_from_row(rows[game_id])
 
 
-def _outcomes(conn: psycopg.Connection, game_ids: list[int], factory: Callable[[], Any], settings: EngineSettings,
-              workers: int) -> Iterator[GameAnalysis | GameFailure]:
-    games = _games(conn, game_ids)
+def _parallel(tasks: Iterator[tuple], factory: Callable[[], Any], settings: EngineSettings,
+              workers: int) -> Iterator[GameAnalysis | ProbeResult | GameFailure]:
+    """Run tasks on `workers` engines; outcomes arrive in completion order. The caller does all DB writes."""
     if workers == 1:
         analyzer = Analyzer(factory, settings)
         try:
-            for game_id, game in games:
-                yield analyzer(game_id, game)
+            for task in tasks:
+                yield _dispatch(analyzer, task)
         finally:
             analyzer.close()
         return
@@ -290,7 +321,7 @@ def _outcomes(conn: psycopg.Connection, game_ids: list[int], factory: Callable[[
 
         def submit() -> None:
             nonlocal in_flight
-            if (task := next(games, None)) is not None:
+            if (task := next(tasks, None)) is not None:
                 pool.apply_async(_work, (task,), callback=finished.put, error_callback=finished.put)
                 in_flight += 1
 
@@ -303,6 +334,56 @@ def _outcomes(conn: psycopg.Connection, game_ids: list[int], factory: Callable[[
                 raise outcome  # a bug in the worker, not an engine hiccup: fail the run loudly
             yield outcome
             submit()
+
+
+def verify_only_winning_moves(
+    conn: psycopg.Connection,
+    config_id: int | None = None,
+    winning: float = 0.90,
+    player: str | None = None,
+    stockfish: str | None = None,
+    workers: int = 1,
+    progress: Callable[[dict], None] | None = None,
+    engine_factory: Callable[[], Any] | None = None,
+) -> dict:
+    """Stage 2 of ONLY_WINNING_MOVE: a two-line search (top_two probe) only where it can matter: the mover
+    was clearly winning and played the engine's choice. Uses the config's own settings, and refuses a
+    binary that reports a different engine, so results stay attributable. Resumable: finished probes are
+    skipped next time."""
+    config = db.get_engine_config(conn, config_id) if config_id else db.default_engine_config(conn)
+    if config is None:
+        raise ValueError("no engine analysis yet: run `chesstrove engine analyze` first")
+    settings = EngineSettings(config["limit_kind"], config["limit_value"], config["multipv"], config["threads"], config["hash_mb"])
+    if engine_factory is None:
+        engine_factory = functools.partial(open_stockfish, stockfish_path(stockfish), settings)
+    identify = engine_factory()
+    try:
+        if identify.id["name"] != config["engine_name"]:
+            raise ValueError(f"config {config['id']} was analyzed with {config['engine_name']!r}, "
+                             f"this binary is {identify.id['name']!r}")
+    finally:
+        with contextlib.suppress(Exception):
+            identify.quit()
+
+    candidates = db.only_winning_move_candidates(conn, config["id"], winning, player)
+    by_game: dict[int, list[int]] = {}
+    for game_id, position in candidates:
+        by_game.setdefault(game_id, []).append(position)
+    tasks = (("probe", game_id, game, position, "top_two")
+             for game_id, game in _games(conn, list(by_game)) for position in by_game[game_id])
+    done = failed = 0
+    started = time.perf_counter()
+    for outcome in _parallel(tasks, engine_factory, settings, workers):
+        if isinstance(outcome, GameFailure):
+            failed += 1
+            continue
+        db.insert_engine_probes(conn, config["id"], outcome.game_id, [outcome.probe])
+        done += 1
+        if progress:
+            elapsed = time.perf_counter() - started
+            progress({"done": done, "total": len(candidates), "elapsed": elapsed})
+    return {"config_id": config["id"], "candidates": len(candidates), "probed": done, "failed": failed,
+            "seconds": round(time.perf_counter() - started, 1)}
 
 
 def _sha256(path: str) -> str:

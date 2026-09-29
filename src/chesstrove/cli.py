@@ -9,7 +9,7 @@ from pathlib import Path
 
 import psycopg
 
-from chesstrove import db, engine, insights
+from chesstrove import db, engine, insights, labels
 from chesstrove.analysis import reanalyze
 from chesstrove.detectors import DETECTORS
 from chesstrove.ingest import import_chesscom, import_lichess, import_pgn
@@ -65,6 +65,20 @@ def main(argv: list[str] | None = None) -> int:
                    help="parallel Stockfish processes, 1 thread each (default: CPUs - 1)")
     p.add_argument("--stockfish", help="path to the binary (default: $CHESSTROVE_STOCKFISH, then PATH)")
     esub.add_parser("runs", help="list engine runs")
+    p = esub.add_parser("labels", help="BLUNDER / MISSED_WIN / ONLY_WINNING_MOVE from stored evaluations (instant)")
+    p.add_argument("--type", choices=labels.LABELS, required=True)
+    p.add_argument("--player", help="only moves played by this username")
+    p.add_argument("--config", type=int, help="engine config (default: the one covering most games)")
+    p.add_argument("--blunder", type=float, default=labels.Thresholds().blunder, help="expected-score drop")
+    p.add_argument("--winning", type=float, default=labels.Thresholds().winning)
+    p.add_argument("--not-winning", type=float, default=labels.Thresholds().not_winning)
+    p.add_argument("--limit", type=int, default=20)
+    p = esub.add_parser("verify-only-moves", help="two-line searches where ONLY_WINNING_MOVE can apply (resumable)")
+    p.add_argument("--player", help="only this username's moves (fewer candidates)")
+    p.add_argument("--config", type=int)
+    p.add_argument("--winning", type=float, default=labels.Thresholds().winning)
+    p.add_argument("--workers", type=int, default=engine.default_workers())
+    p.add_argument("--stockfish")
     args = parser.parse_args(argv)
 
     try:
@@ -115,6 +129,22 @@ def main(argv: list[str] | None = None) -> int:
             case "engine":
                 if args.engine_command == "runs":
                     _print(db.list_engine_runs(conn))
+                    return 0
+                if args.engine_command == "labels":
+                    t = labels.Thresholds(args.blunder, args.winning, args.not_winning)
+                    _print(labels.query(conn, args.type, t, args.config, args.player, args.limit))
+                    return 0
+                if args.engine_command == "verify-only-moves":
+                    def show(p: dict) -> None:
+                        print(f"\r{p['done']:,}/{p['total']:,} positions", end="", file=sys.stderr, flush=True)
+                    try:
+                        result = engine.verify_only_winning_moves(conn, args.config, args.winning, args.player,
+                                                                  args.stockfish, args.workers, show)
+                    except (ValueError, FileNotFoundError) as e:
+                        print(e, file=sys.stderr)
+                        return 1
+                    print(file=sys.stderr)
+                    _print(result)
                     return 0
                 settings = engine.EngineSettings(
                     limit_kind="depth" if args.depth else "nodes",
