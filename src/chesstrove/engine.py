@@ -14,6 +14,7 @@ import os
 import queue
 import shutil
 import signal
+import threading
 import time
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
@@ -30,6 +31,13 @@ from chesstrove.reconstruction import start_board
 PV_MAX = 12  # plies of principal variation kept per position; bounds storage
 PROBE_PV_MAX = 4  # per probe line: enough to see the reply (e.g. the capture of a promoted piece)
 PROBE_MAX_DEPTH = 30  # a proven mate reports depth 245; searching every legal move that deep never ends
+# A depth limit bounds iterations, not work: one MultiPV iteration can explode (see ARCHITECTURE.md, "The
+# depth-22 probe stall"). So probes also carry a node ceiling, deterministic under Threads=1 and a cleared
+# hash, and keep the deepest iteration in which every line got an exact score.
+PROBE_NODES_PER_LINE = 20_000_000
+# A stuck engine, not a slow search: the probe fails (nothing stored) and is retried next run. Never a
+# search limit, so results never depend on wall time.
+PROBE_WATCHDOG_SECONDS = 900.0
 FETCH_BATCH = 50  # games loaded per query while feeding workers
 INFO = chess.engine.INFO_BASIC | chess.engine.INFO_SCORE | chess.engine.INFO_PV
 
@@ -97,6 +105,11 @@ class ProbeResult:
 class GameFailure:
     game_id: int
     error: str
+    task: tuple = ()  # for probes: (position, kind); what to retry
+
+
+class ProbeError(chess.engine.EngineError):
+    """A probe that produced no usable result (watchdog fired, or no iteration completed for every line)."""
 
 
 def stockfish_path(explicit: str | None = None) -> str:
@@ -156,12 +169,14 @@ def probe_requests(game: CanonicalGame) -> list[tuple[int, str, tuple[str, ...] 
 
 def run_probe(engine: Any, settings: EngineSettings, game: CanonicalGame, position: int,
               kind: Literal["vs_queen", "all_moves", "top_two"], moves: tuple[str, ...] | None = None,
-              depth: int | None = None) -> Probe:
-    """A multi-line search whose lines are compared with each other, so it is always depth-limited: every
-    line finishes the same iteration. A node limit would stop mid-iteration, leaving some lines a depth
-    deeper than others, and their scores not comparable (seen on a real game: a 270 cp disagreement).
-    `depth`: for node-limited configs, the depth the normal analysis reached at this position; depth
-    configs use their own depth."""
+              depth: int | None = None, nodes_per_line: int = PROBE_NODES_PER_LINE,
+              watchdog: float = PROBE_WATCHDOG_SECONDS) -> Probe:
+    """A multi-line search whose lines are compared with each other, so every line must come from the same
+    completed iteration: a search cut mid-iteration leaves some lines a depth deeper than others, and their
+    scores not comparable (seen on a real game: a 270 cp disagreement). The target is a depth (`depth`: the
+    position's own analysis depth for node configs; depth configs use theirs); a node ceiling of
+    `nodes_per_line` x lines bounds the work, and the result is the deepest iteration every line finished.
+    The budget records both, and `completed_depth` < `depth` says the ceiling cut it short."""
     if settings.limit_kind == "depth":
         depth = settings.limit_value
     if not depth:
@@ -175,16 +190,45 @@ def run_probe(engine: Any, settings: EngineSettings, game: CanonicalGame, positi
     else:
         root = [board.parse_uci(m) for m in moves] if moves else list(board.legal_moves)
         lines = len(root)
-    # A fresh game token clears the hash, so probes never influence (or depend on) the position results.
-    infos = engine.analyse(board, chess.engine.Limit(depth=depth), multipv=lines, game=object(), info=INFO,
-                           root_moves=root)
+    node_cap = nodes_per_line * lines
+    infos, completed = _complete_iteration(engine, board, depth, node_cap, lines, root, watchdog)
     results = tuple({"uci": i["pv"][0].uci(), "score_cp": i["score"].white().score(), "mate": i["score"].white().mate(),
                      "wdl": list(i["wdl"].white()) if "wdl" in i else None, "depth": i.get("depth"),
                      "pv": [m.uci() for m in i["pv"][:PROBE_PV_MAX]]}  # the reply reveals transpositions
-                    for i in infos if i.get("pv"))
-    budget = {"depth": depth}
+                    for i in infos)
+    budget = {"depth": depth, "nodes_cap": node_cap, "completed_depth": completed}
     moves_searched = tuple(m.uci() for m in root) if root else tuple(r["uci"] for r in results)
     return Probe(position, kind, moves_searched, results, budget)
+
+
+def _complete_iteration(engine: Any, board: chess.Board, depth: int, node_cap: int, lines: int,
+                        root: list[chess.Move] | None, watchdog: float) -> tuple[list[dict], int]:
+    """Streams one search and returns the lines of the deepest iteration in which all `lines` reported an
+    exact score (fail-high/low bounds don't count), ranked, with that depth. Stockfish reports every line
+    at the end of each iteration, so a search stopped by the node ceiling still leaves one whole iteration.
+    The watchdog is only for a stuck engine: if it fires the probe fails, whatever the engine said."""
+    by_depth: dict[int, dict[int, dict]] = {}
+    stuck = threading.Event()
+    # A fresh game token clears the hash, so probes never influence (or depend on) the position results.
+    with engine.analysis(board, chess.engine.Limit(depth=depth, nodes=node_cap), multipv=lines, game=object(),
+                         info=INFO, root_moves=root) as search:
+        timer = threading.Timer(watchdog, lambda: (stuck.set(), search.stop()))
+        timer.daemon = True
+        timer.start()
+        try:
+            for info in search:
+                if (info.get("pv") and "score" in info and info.get("depth")
+                        and not info.get("lowerbound") and not info.get("upperbound")):
+                    by_depth.setdefault(info["depth"], {})[info.get("multipv", 1)] = info
+        finally:
+            timer.cancel()
+    if stuck.is_set():
+        raise ProbeError(f"watchdog: no answer after {watchdog:.0f}s (engine stuck?); nothing stored")
+    complete = [d for d, got in by_depth.items() if len(got) == lines]
+    if not complete:
+        raise ProbeError(f"no iteration scored all {lines} lines within {node_cap:,} nodes")
+    best = max(complete)
+    return [by_depth[best][k] for k in sorted(by_depth[best])], best  # MultiPV order = Stockfish's ranking
 
 
 class Analyzer:
@@ -199,8 +243,13 @@ class Analyzer:
         t = time.perf_counter()
         try:
             positions = analyze_game(self.engine, self.settings, game)
-            probes = [run_probe(self.engine, self.settings, game, p, kind, moves, depth=positions[p].depth)
-                      for p, kind, moves in probe_requests(game)]
+            probes = []
+            for p, kind, moves in probe_requests(game):
+                try:
+                    probes.append(run_probe(self.engine, self.settings, game, p, kind, moves, depth=positions[p].depth))
+                except ProbeError:  # the game's evaluations still count; verify-underpromotions retries the probe
+                    self.close()
+                    self.engine = self.factory()
         except chess.engine.EngineError as e:  # includes the engine process dying
             self.close()
             self.engine = self.factory()
@@ -215,7 +264,7 @@ class Analyzer:
         except chess.engine.EngineError as e:
             self.close()
             self.engine = self.factory()
-            return GameFailure(game_id, f"{type(e).__name__}: {e}")
+            return GameFailure(game_id, f"{type(e).__name__}: {e}", (position, kind))
         return ProbeResult(game_id, probe, time.perf_counter() - t)
 
     def close(self) -> None:
@@ -386,18 +435,20 @@ def verify_only_winning_moves(
         by_game.setdefault(game_id, []).append(position)
     tasks = (("probe", game_id, game, position, "top_two", None, depths.get((game_id, position)))
              for game_id, game in _games(conn, list(by_game)) for position in by_game[game_id])
-    done = failed = 0
+    done = 0
+    failures: list[dict] = []  # retried next run: finished probes are already stored
     started = time.perf_counter()
     for outcome in _parallel(tasks, engine_factory, settings, workers):
         if isinstance(outcome, GameFailure):
-            failed += 1
+            failures.append({"game_id": outcome.game_id, "position": outcome.task[0] if outcome.task else None,
+                             "kind": outcome.task[1] if outcome.task else None, "error": outcome.error})
             continue
         db.insert_engine_probes(conn, config["id"], outcome.game_id, [outcome.probe])
         done += 1
         if progress:
             elapsed = time.perf_counter() - started
             progress({"done": done, "total": len(candidates), "elapsed": elapsed})
-    return {"config_id": config["id"], "candidates": len(candidates), "probed": done, "failed": failed,
+    return {"config_id": config["id"], "candidates": len(candidates), "probed": done, "failed": failures,
             "seconds": round(time.perf_counter() - started, 1)}
 
 
@@ -437,16 +488,18 @@ def verify_underpromotions(
                 wanted.setdefault(game_id, []).append((ply - 1, kind, moves))
     tasks = (("probe", game_id, game, position, kind, moves, depths.get((game_id, position)))
              for game_id, game in _games(conn, list(wanted)) for position, kind, moves in wanted[game_id])
-    done = failed = 0
+    done = 0
+    failures: list[dict] = []  # retried next run: finished probes are already stored
     started = time.perf_counter()
     for outcome in _parallel(tasks, engine_factory, settings, workers):
         if isinstance(outcome, GameFailure):
-            failed += 1
+            failures.append({"game_id": outcome.game_id, "position": outcome.task[0] if outcome.task else None,
+                             "kind": outcome.task[1] if outcome.task else None, "error": outcome.error})
             continue
         db.insert_engine_probes(conn, config_id, outcome.game_id, [outcome.probe])
         done += 1
     return {"config_id": config_id, "engine": engine_name, settings.limit_kind: settings.limit_value,
-            "probes": done, "failed": failed, "seconds": round(time.perf_counter() - started, 1)}
+            "probes": done, "failed": failures, "seconds": round(time.perf_counter() - started, 1)}
 
 
 def _sha256(path: str) -> str:

@@ -46,7 +46,23 @@ class ScriptedEngine:
         choice = self.moves[position] if position < len(self.moves) else next(iter(board.legal_moves)).uci()
         return [line(choice, *self.script.get(position, (0, (0, 1000, 0))))]
 
+    def analysis(self, board, limit, multipv, game, info, root_moves=None):
+        """Probes stream: one completed iteration at the requested depth."""
+        infos = self.analyse(board, limit, multipv, game, info, root_moves)
+        return _Search([{**i, "depth": limit.depth, "multipv": k} for k, i in enumerate(infos, 1)])
+
     def quit(self):
+        pass
+
+
+class _Search(list):
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def stop(self):
         pass
 
 
@@ -139,8 +155,8 @@ def test_deeper_underpromotion_verification_sits_next_to_the_base_verdict(conn):
     a = e["engine_analysis"]
     assert a["config"]["nodes"] == 1_000  # the base verdict stays the full-history config's
     [deep] = a["deeper_verification"]
-    assert deep["config"]["depth"] == 18 and deep["all_moves"]["budget"] == {"depth": 18}
-    assert a["all_moves"]["budget"] == {"depth": 12}  # base probes: the depth the normal analysis reached
+    assert deep["config"]["depth"] == 18 and deep["all_moves"]["budget"]["completed_depth"] == 18
+    assert a["all_moves"]["budget"]["depth"] == 12  # base probes: the depth the normal analysis reached
     assert (deep["tied_for_best_move"], deep["better_than_queen"]) == (True, False)  # every move scored 0
     assert [c["limit_value"] for c in db.status_summary(conn, {})["engine"]] == [1_000]  # probe-only config hidden
 

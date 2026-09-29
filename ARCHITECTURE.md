@@ -303,8 +303,7 @@ with its own search (`engine_move_probes`, one row per kind), and never lets one
 
 - **A. Was the underpromotion the best move in the position?** (`kind = 'all_moves'`) One search from the
   position before the move with `searchmoves` = **every legal move** and MultiPV = their number, so every
-  root move is scored in the same search iteration. Budget: config nodes × number of legal moves (each move
-  gets about the normal per-position effort); depth configs search every line to the configured depth.
+  root move is scored in the same search iteration. Budget: see *Probe budget* below.
   - `is_best_move`: the played move scores at least as well as **every** legal move.
   - `tied_for_best_move`: best, and some other move scores exactly the same. For example, if `=Q#` and `=R#`
     both mate in 1, the rook underpromotion is tied, not unique.
@@ -313,7 +312,7 @@ with its own search (`engine_move_probes`, one row per kind), and never lets one
   - If the search didn't return a score for every legal move, all four are `null`. Never guess: an unscored
     move might be better.
 - **B. Was underpromoting better than queening on the same square?** (`kind = 'vs_queen'`) One search
-  over exactly {played underpromotion, queen promotion}, MultiPV 2, budget config nodes × 2. Gives
+  over exactly {played underpromotion, queen promotion}, MultiPV 2, same budget rule. Gives
   `better_than_queen` (strictly better; equal is not better) plus both evaluations. It supports statements
   like "queening here would have thrown away the win".
 
@@ -325,7 +324,54 @@ events carry only `matches_engine_choice` (the played move is the unrestricted s
 `rank_in_engine_lines` (within MultiPV lines, if any), and never `is_best_move`.
 
 Probes run inside the same per-game task, after the game's positions, each with the hash cleared, so the
-position results are identical whether or not probes ran.
+position results are identical whether or not probes ran. A probe that fails skips only itself: the
+game's evaluations are kept, and `verify-underpromotions` retries the missing probe.
+
+**Probe budget.** Every line of a probe must come from the same completed search iteration, otherwise
+their scores aren't comparable. So a probe targets a depth (the position's own analysis depth for node
+configs, or the config's depth, capped at 30) **and** carries a node ceiling of 20M × lines. The ceiling is
+deterministic under Threads = 1 with a cleared hash. The result is the deepest iteration in which every line
+reported an exact score (fail-high/low bounds don't count). The budget records all three, e.g.
+`{"depth": 22, "nodes_cap": 280000000, "completed_depth": 21}`, and `completed_depth < depth` says the
+ceiling cut it short. If no iteration covers every line, the probe fails and nothing is stored. A
+wall-clock watchdog (15 min) exists only for a stuck engine: when it fires, the probe fails and is retried
+next run. It is never a search limit, so no stored result depends on time. `verify-*` commands return every
+failed probe with its game, position and kind.
+
+**The depth-22 probe stall (found 2026-09).**
+- **What happened:** the depth-22 `all_moves` probe for game 3658, position 104 (White to move, before
+  `h8=B+`) ran for over two hours and never finished. The position is
+  `8/7P/8/4k1p1/8/2r1P1P1/5PK1/8 w - - 0 53`, with 14 legal moves.
+- **Not the cause:** a missing depth limit. `go depth 22` reached Stockfish, and every completed search
+  reported exactly the requested depth.
+- **Measured, MultiPV 14:**
+
+  | Depth | Time | Nodes | Top line |
+  |---|---|---|---|
+  | 16 | 1.0 s | 2.8M | |
+  | 18 | 2.5 s | 8.1M | |
+  | 20 | 6.7 s | 25M | becomes a mate (#+19) |
+  | 21 | 29.5 s | 146M | |
+
+  At depth 22, lines 1–9 finished by 37 s (180M nodes). Line 10 then went on for hours; a streamed rerun
+  reported nothing more in 5.5 further minutes.
+- **Each move searched alone at depth 22** (h8=N, Kf1, Kg1, e4, Kh1, Kf3) took 0.4–1.9 s (1–5M nodes).
+- **The cause:** interaction between the lines of one MultiPV search. All 14 root moves share one search
+  and one hash table. Once the top line is a long forced mate in a rook-and-pawn endgame, huge decisive
+  scores leak into the searches of the losing moves. Their scores become unstable: g4 is −5.5 alone but
+  −53.48 inside the 14-line search, and scores in the thousands (e.g. −21.65) appear where the moves alone
+  score about −5. Each further iteration costs several times the last: ×2.7 from depth 20 to 21, then
+  unbounded at 22.
+- **What that means:** a depth limit bounds the number of iterations, not the work inside one iteration.
+- **The fix is the node ceiling above, not a lower depth.** The probe now finishes in 52 s at a completed
+  depth of 21 with all 14 lines, recorded as such.
+- **Regression tests** (`tests/test_engine.py`): the real position with a small ceiling is bounded, keeps
+  one whole iteration, and is reproducible run to run. A scripted stream checks that a search cut
+  mid-iteration keeps the previous whole iteration and that fail-high bounds are ignored, that a search
+  with no whole iteration fails rather than guesses, and that the watchdog fails a stuck engine.
+- **Still open:** the unstable scores deep in a 14-line search are also a correctness caveat. They matter
+  for the rank of a bad move and for how far behind it is, not for which move is best. Verdicts that
+  depend on a line far down the list should be read with that in mind.
 
 **Deeper verification.** `chesstrove engine verify-underpromotions --nodes 1000000` re-asks both questions
 under a stronger config. The results are stored under that config's own id, next to (never over) the
@@ -351,12 +397,12 @@ The combined answer is produced at query time (`chesstrove events --engine`, `GE
                      "engine_choice": "e7e8n", "matches_engine_choice": true,
                      "is_best_move": true, "tied_for_best_move": false, "unique_best_move": true,
                      "played_move_rank": 1,
-                     "all_moves": {"legal_moves": 10, "scored": 10, "budget": {"nodes": 250000},
+                     "all_moves": {"legal_moves": 10, "scored": 10, "budget": {"depth": 11, "nodes_cap": 200000000, "completed_depth": 11},
                                    "evaluation": {"cp": 486}, "best_moves": ["e7e8n"],
                                    "best_evaluation": {"cp": 486}},
                      "better_than_queen": true,
                      "vs_queen": {"evaluation": {"cp": 404}, "queen_promotion_evaluation": {"cp": 0},
-                                  "budget": {"nodes": 50000}}}}
+                                  "budget": {"depth": 11, "nodes_cap": 40000000, "completed_depth": 11}}}}
 ```
 
 Rule-based facts (`queen_gives_mate` and so on) and engine facts sit side by side, and never substitute for

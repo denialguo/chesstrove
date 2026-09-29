@@ -1,4 +1,5 @@
 import shutil
+import time
 
 import chess
 import chess.engine
@@ -51,8 +52,30 @@ class FakeEngine:
                  "depth": 5, "seldepth": 7, "nodes": limit.nodes,
                  "wdl": chess.engine.PovWdl(chess.engine.Wdl(100, 850, 50), chess.WHITE)}]
 
+    def analysis(self, board, limit, multipv, game, info, root_moves=None):
+        """Streams what analyse() would answer as one completed iteration at the requested depth."""
+        infos = self.analyse(board, limit, multipv, game, info, root_moves)
+        return FakeSearch([{**i, "depth": limit.depth, "multipv": k} for k, i in enumerate(infos, 1)])
+
     def quit(self):
         self.quit_called = True
+
+
+class FakeSearch:
+    def __init__(self, infos):
+        self.infos, self.stopped = infos, False
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def __iter__(self):
+        return iter(self.infos)
+
+    def stop(self):
+        self.stopped = True
 
 
 def one(pgn: str):
@@ -264,8 +287,11 @@ def test_probes_cover_the_queen_question_and_every_legal_move(conn, monkeypatch)
     assert probes[1]["moves"] == ["a7a8n", "a7a8q"]
     # depth-limited at the depth the normal analysis reached (the fake reports 5), so every line finishes
     # the same iteration and the scores compare
-    assert (probes[0]["budget"], probes[1]["budget"]) == ({"depth": 5}, {"depth": 5})
-    assert [(p[2].depth, p[2].nodes) for p in fake.probes] == [(5, None), (5, None)]
+    cap = engine.PROBE_NODES_PER_LINE
+    assert (probes[0]["budget"], probes[1]["budget"]) == ({"depth": 5, "nodes_cap": 9 * cap, "completed_depth": 5},
+                                                          {"depth": 5, "nodes_cap": 2 * cap, "completed_depth": 5})
+    # the depth AND the node ceiling reach the engine
+    assert sorted((p[2].depth, p[2].nodes) for p in fake.probes) == [(5, 2 * cap), (5, 9 * cap)]
 
 
 def test_unique_best_and_better_than_queen(conn, monkeypatch):
@@ -296,9 +322,12 @@ def test_black_scores_are_flipped(conn, monkeypatch):
 
 
 def test_incomplete_all_moves_search_claims_nothing(conn, monkeypatch):
+    # A search that never scores every legal move fails the probe: nothing is stored, nothing is claimed,
+    # and the game's own evaluations are kept.
     a = underpromotion_analysis(conn, monkeypatch, {"a7a8n": 50}, drop_probe_lines=1)["w"]
-    assert (a["is_best_move"], a["tied_for_best_move"], a["unique_best_move"]) == (None, None, None)
-    assert a["all_moves"]["scored"] < a["all_moves"]["legal_moves"]
+    assert "is_best_move" not in a and "all_moves" not in a
+    assert conn.execute("SELECT count(*) AS n FROM engine_move_probes WHERE kind = 'all_moves'").fetchone()["n"] == 0
+    assert conn.execute("SELECT count(*) AS n FROM engine_game_status").fetchone()["n"] == 2
 
 
 def test_ordinary_moves_never_claim_best(conn):
@@ -401,4 +430,81 @@ def test_probe_depth_is_capped():
     fake = FakeEngine()
     [game] = read_pgn(WHITE_UNDER)
     probe = engine.run_probe(fake, TINY, game, 0, "vs_queen", ("a7a8n", "a7a8q"), depth=245)  # a proven mate's depth
-    assert probe.budget == {"depth": engine.PROBE_MAX_DEPTH} and fake.probes[0][2].depth == engine.PROBE_MAX_DEPTH
+    assert probe.budget["depth"] == engine.PROBE_MAX_DEPTH and fake.probes[0][2].depth == engine.PROBE_MAX_DEPTH
+
+
+# --- the depth-22 probe stall (ARCHITECTURE.md): bounded, whole-iteration probes ---------------------
+
+STALL_FEN = "8/7P/8/4k1p1/8/2r1P1P1/5PK1/8 w - - 0 53"  # game 3658, before h8=B+: 14 legal moves
+
+
+def _info(uci, cp, depth, multipv, bound=None):
+    i = {"score": chess.engine.PovScore(chess.engine.Cp(cp), chess.WHITE), "pv": [chess.Move.from_uci(uci)],
+         "depth": depth, "multipv": multipv}
+    return {**i, bound: True} if bound else i
+
+
+class ScriptedEngine:
+    """Streams a fixed list of infos, like a search stopped by its node ceiling mid-iteration."""
+
+    def __init__(self, infos, block=False):
+        self.infos, self.block, self.limits = infos, block, []
+
+    def analysis(self, board, limit, multipv, game, info, root_moves=None):
+        self.limits.append(limit)
+        engine = self
+
+        class Search(FakeSearch):
+            def __iter__(self):
+                yield from self.infos
+                while engine.block and not self.stopped:  # a stuck engine: nothing until stop()
+                    time.sleep(0.01)
+
+        return Search(self.infos)
+
+
+def test_a_search_cut_mid_iteration_keeps_the_last_whole_iteration():
+    [game] = read_pgn(WHITE_UNDER)
+    infos = [_info("a7a8n", 40, 7, 1), _info("a7a8q", 20, 7, 2),  # iteration 7: both lines
+             _info("a7a8q", 90, 8, 1, "lowerbound"),                # iteration 8: a fail-high doesn't count
+             _info("a7a8q", 60, 8, 1)]                              # ...and only one line finished
+    fake = ScriptedEngine(infos)
+    probe = engine.run_probe(fake, TINY, game, 0, "vs_queen", ("a7a8n", "a7a8q"), depth=9, nodes_per_line=1000)
+    assert [(r["uci"], r["score_cp"], r["depth"]) for r in probe.results] == [("a7a8n", 40, 7), ("a7a8q", 20, 7)]
+    assert probe.budget == {"depth": 9, "nodes_cap": 2000, "completed_depth": 7}
+    assert (fake.limits[0].depth, fake.limits[0].nodes) == (9, 2000)
+
+
+def test_no_whole_iteration_is_a_failure_not_a_guess():
+    [game] = read_pgn(WHITE_UNDER)
+    with pytest.raises(engine.ProbeError):
+        engine.run_probe(ScriptedEngine([_info("a7a8n", 40, 7, 1)]), TINY, game, 0, "vs_queen", ("a7a8n", "a7a8q"), depth=9)
+
+
+def test_watchdog_fails_a_stuck_engine_and_stores_nothing():
+    [game] = read_pgn(WHITE_UNDER)
+    infos = [_info("a7a8n", 40, 7, 1), _info("a7a8q", 20, 7, 2)]  # a whole iteration, then silence
+    with pytest.raises(engine.ProbeError, match="watchdog"):
+        engine.run_probe(ScriptedEngine(infos, block=True), TINY, game, 0, "vs_queen", ("a7a8n", "a7a8q"),
+                         depth=9, watchdog=0.2)
+
+
+@needs_stockfish
+def test_stockfish_stall_position_is_bounded_and_reproducible():
+    # The real position that hung a depth-22 all_moves probe for hours: every move alone takes ~1s at
+    # depth 22, but the 14-line search explodes once the top line becomes a mate. A (small, for the
+    # test) node ceiling must end it deterministically, at a whole iteration, every line scored.
+    [game] = read_pgn(f'[SetUp "1"]\n[FEN "{STALL_FEN}"]\n[Result "*"]\n\n53. h8=B+ *\n')
+    settings = EngineSettings("depth", 22)
+    runs = []
+    for _ in range(2):
+        sf = engine.open_stockfish(engine.stockfish_path(), settings)
+        try:
+            runs.append(engine.run_probe(sf, settings, game, 0, "all_moves", nodes_per_line=200_000))
+        finally:
+            sf.quit()
+    first, second = runs
+    assert len(first.results) == 14 and first.budget["depth"] == 22
+    assert first.budget["nodes_cap"] == 14 * 200_000 and first.budget["completed_depth"] < 22
+    assert {r["depth"] for r in first.results} == {first.budget["completed_depth"]}  # one iteration, all lines
+    assert first.results == second.results and first.budget == second.budget  # node ceilings reproduce
