@@ -1,0 +1,26 @@
+[project]
+name = "chesstrove"
+version = "0.1.0"
+description = "Personal chess-history indexing engine"
+readme = "README.md"
+authors = [
+    { name = "Daniel Guo", email = "123143269+denialguo@users.noreply.github.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "chess>=1.11.2",
+    "psycopg[binary]>=3.3.6",
+]
+
+[project.scripts]
+chesstrove = "chesstrove.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.11.25,<0.12.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pgserver>=0.1.4",
+    "pytest>=9.1.1",
+]
