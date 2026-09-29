@@ -94,7 +94,7 @@ p { text-wrap: pretty; }
 
 /* ---------- username form ---------- */
 .uform { display: grid; gap: var(--space-2); }
-.uform__label { font-family: var(--mono); font-size: 0.7rem; letter-spacing: 0.08em; text-transform: uppercase; }
+.uform__label { font-size: 0.78rem; font-weight: 600; letter-spacing: 0.02em; }
 .uform__input {
   font: inherit; border: 0; background: transparent; color: inherit; min-width: 0; width: 100%;
 }
@@ -157,25 +157,24 @@ p { text-wrap: pretty; }
 .case__body { display: grid; grid-template-columns: 1fr 1fr; gap: var(--case-pad); align-items: start; }
 .case__body > * { position: relative; }
 .case__plate {
-  margin: var(--space-4) auto 0; text-align: center; font-family: var(--mono); font-size: 0.78rem;
-  letter-spacing: 0.02em; color: var(--on-walnut-2); max-width: 60ch;
+  margin: var(--space-4) auto 0; text-align: center; font-size: 0.9rem;
+  color: var(--on-walnut-2); max-width: 60ch;
 }
 
 .plunger {
   display: inline-block; font-family: var(--display); font-weight: 800; text-transform: uppercase;
   letter-spacing: 0.04em; font-size: 1.05rem; line-height: 1; white-space: nowrap;
-  border: 0; cursor: pointer; color: var(--dial);
-  background: linear-gradient(var(--brass-hi), var(--brass) 55%, var(--brass-lo));
+  border: 0; cursor: pointer; color: var(--dial); background: var(--brass);
   border-radius: 0.7rem 0.7rem 0.25rem 0.25rem;
   padding: 0.85rem 1.6rem 0.75rem;
-  box-shadow: 0 -1px 0 rgb(255 255 255 / 0.35) inset, 0 6px 0 -1px var(--brass-lo), 0 10px 14px -6px rgb(0 0 0 / 0.5);
-  transition: transform 140ms var(--ease-out), box-shadow 140ms var(--ease-out), filter 140ms var(--ease-out);
+  box-shadow: 0 8px 14px -6px rgb(0 0 0 / 0.5);
+  transition: transform 140ms var(--ease-out), box-shadow 140ms var(--ease-out), background-color 140ms var(--ease-out);
 }
-.plunger:hover { filter: brightness(1.06); }
+button.plunger:hover { background: var(--brass-hi); }
 /* pressing the plunger pushes it into the case, like the real thing */
-.case__plungers > button.plunger:active { transform: translateY(calc(-100% + 8px)); box-shadow: 0 -1px 0 rgb(255 255 255 / 0.35) inset, 0 1px 0 0 var(--brass-lo), 0 3px 6px -2px rgb(0 0 0 / 0.5); }
+.case__plungers > button.plunger:active { transform: translateY(calc(-100% + 8px)); box-shadow: 0 3px 6px -3px rgb(0 0 0 / 0.5); }
 .plunger--decor { width: 5.5rem; height: 1.9rem; padding: 0; cursor: default; }
-.case__plungers > .plunger--down { height: 0.9rem; transform: translateY(calc(-100% + 3px)); box-shadow: 0 -1px 0 rgb(255 255 255 / 0.3) inset, 0 2px 0 0 var(--brass-lo); }
+.case__plungers > .plunger--down { height: 0.9rem; transform: translateY(calc(-100% + 3px)); box-shadow: 0 3px 6px -3px rgb(0 0 0 / 0.5); }
 
 /* ---------- dials ---------- */
 .dial { position: relative; aspect-ratio: 1; width: 100%; container-type: inline-size; }
@@ -185,8 +184,8 @@ p { text-wrap: pretty; }
 .dial__tick { stroke: var(--dial-2); stroke-width: 1; stroke-linecap: round; }
 .dial__tick--hour { stroke: var(--dial); stroke-width: 2.2; }
 .dial__progress { fill: none; stroke: var(--brass); stroke-width: 3.2; stroke-linecap: round; }
-.dial__hand line { stroke: var(--flag); stroke-width: 2.2; stroke-linecap: round; }
-.dial__hand circle { fill: var(--flag); }
+.dial__hand line { stroke: var(--dial); stroke-width: 2.2; stroke-linecap: round; }
+.dial__hand circle { fill: var(--dial); }
 .dial__hand { transform-origin: 100px 100px; animation: sweep 6s linear infinite; }
 @keyframes sweep { to { transform: rotate(360deg); } }
 .dial__content { position: absolute; inset: 16%; display: grid; place-items: center; }
@@ -196,7 +195,7 @@ p { text-wrap: pretty; }
 
 .face { display: grid; justify-items: center; text-align: center; gap: 0.3rem; color: var(--dial); }
 .face__count { font-family: var(--display); font-weight: 800; font-size: clamp(3rem, 22cqi, 7.5rem); line-height: 0.9; letter-spacing: 0.01em; }
-.face__label { font-family: var(--mono); font-size: clamp(0.62rem, 3.4cqi, 0.8rem); letter-spacing: 0.04em; color: var(--dial-2); max-width: 20ch; }
+.face__label { font-size: clamp(0.75rem, 4cqi, 0.95rem); font-weight: 600; color: var(--dial-2); max-width: 20ch; line-height: 1.3; min-height: 2.6em; }
 
 .digits { display: inline-flex; }
 .digits__lead { opacity: 0.18; }
@@ -214,14 +213,13 @@ p { text-wrap: pretty; }
 .board cg-board square.check { background: radial-gradient(ellipse at center, rgb(200 34 44 / 0.95) 0%, rgb(200 34 44 / 0.55) 30%, rgb(200 34 44 / 0) 72%); }
 
 /* ---------- landing ---------- */
-.hero { padding-top: clamp(1.5rem, 5vw, 3.5rem); }
+.hero { padding-top: clamp(1rem, 3vw, 2rem); }
 .hero__title {
-  font-family: var(--display); font-weight: 800; text-transform: uppercase;
-  font-size: clamp(2.3rem, 4.6vw, 4.4rem); line-height: 0.92; letter-spacing: -0.005em;
-  margin: 0; max-width: 22ch;
+  font-family: var(--display); font-weight: 800; text-transform: uppercase; text-align: center;
+  font-size: clamp(1.8rem, 2.6vw, 2.5rem); line-height: 0.95; letter-spacing: 0.005em;
+  margin: 0 auto; max-width: 50rem;
 }
-.hero__lede { margin: var(--space-4) 0 0; max-width: 62ch; font-size: clamp(1rem, 1.4vw, 1.12rem); color: var(--on-walnut-2); }
-.case--landing { margin: 4rem auto 0; max-width: 50rem; }
+.case--landing { margin: 4.2rem auto 0; max-width: 46rem; }
 .case__sample { margin: 0; }
 .case__sample figcaption { margin-top: var(--space-4); font-size: 0.82rem; line-height: 1.5; color: var(--on-walnut-3); text-align: center; padding-inline: 8%; }
 .dial--form .dial__content { inset: 18%; }
@@ -252,17 +250,17 @@ p { text-wrap: pretty; }
 .player-head { padding-top: var(--space-5); }
 .player-head__name {
   font-family: var(--display); font-weight: 800; text-transform: uppercase; margin: 0; line-height: 0.9;
-  font-size: clamp(2.8rem, 8vw, 6rem); overflow-wrap: anywhere;
+  font-size: clamp(2.6rem, 6vw, 4.4rem); overflow-wrap: anywhere;
 }
 .player-head__meta { margin: var(--space-3) 0 0; color: var(--on-walnut-2); }
-.case--player { margin-top: 4.2rem; }
+.case--player { margin: 3.6rem 0 0; max-width: 38rem; }
 
 .section-head { display: grid; gap: var(--space-3); margin-bottom: var(--space-5); }
 .section-head p { margin: 0; color: var(--on-walnut-2); max-width: var(--measure); }
 
-.ledger { margin-top: var(--space-8); }
+.ledger { margin-top: var(--space-6); }
 .ledger__cols, .ledger__summary { display: grid; grid-template-columns: 5.5rem 1fr 5.5rem; align-items: center; gap: var(--space-4); }
-.ledger__cols { font-family: var(--mono); font-size: 0.68rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--on-walnut-3); padding: 0 var(--space-4) var(--space-2); }
+.ledger__cols { font-size: 0.8rem; font-weight: 600; color: var(--on-walnut-3); padding: 0 var(--space-4) var(--space-2); }
 .ledger__cols > * { white-space: nowrap; }
 .ledger__cols > :last-child { text-align: right; }
 .ledger__rows { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--walnut-rule); }
@@ -332,7 +330,9 @@ p { text-wrap: pretty; }
 .textlink:hover { color: var(--on-walnut); }
 
 .muted { color: var(--on-walnut-3); margin: 0; }
-.loading { color: var(--on-walnut-3); font-family: var(--mono); font-size: 0.85rem; padding-block: var(--space-6); }
+.loading { color: var(--on-walnut-3); font-size: 0.9rem; padding-block: var(--space-6); }
+.visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.tag { display: inline-block; font-size: 0.75rem; font-weight: 700; padding: 0.05rem 0.45rem; margin-right: 0.35rem; border-radius: 999px; background: var(--enamel); color: var(--dial); }
 .empty { padding-top: var(--space-8); max-width: 40rem; }
 .empty h1 { font-family: var(--display); font-weight: 800; text-transform: uppercase; font-size: clamp(2.2rem, 5vw, 3.6rem); line-height: 0.95; margin: 0; }
 .empty p { color: var(--on-walnut-2); }
@@ -347,9 +347,17 @@ p { text-wrap: pretty; }
 .viewer__board { display: grid; grid-template-columns: auto 1fr; gap: var(--space-3); }
 .viewer__stack { display: grid; gap: var(--space-2); }
 .viewer__stack .board { border-radius: 4px; overflow: hidden; box-shadow: 0 0 0 1px var(--walnut-edge), 0 20px 36px -20px rgb(0 0 0 / 0.7); }
-.plate { display: flex; justify-content: space-between; align-items: baseline; padding: 0.3rem 0.1rem; }
-.plate__name { font-weight: 700; }
-.plate__rating { font-family: var(--mono); font-size: 0.8rem; color: var(--on-walnut-3); }
+.plate { display: flex; align-items: center; gap: var(--space-3); padding: 0.35rem 0.1rem; }
+.plate__name { font-weight: 700; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.plate__dial { width: 1.9rem; height: 1.9rem; flex: none; }
+.plate__bezel { fill: var(--dial); }
+.plate__enamel { fill: var(--enamel); }
+.plate__hand line { stroke: var(--dial); stroke-width: 1.6; stroke-linecap: round; }
+.plate__pin { fill: var(--dial); }
+.plate__hand { transform-origin: 16px 16px; }
+.plate--to-move .plate__hand { animation: sweep 6s linear infinite; }
+.plate__rating { font-family: var(--display); font-weight: 800; font-size: 1.35rem; line-height: 1; padding: 0.2rem 0.45rem 0.15rem; border-radius: 6px; background: var(--enamel); color: var(--dial); }
+.plate:not(.plate--to-move) .plate__rating { background: var(--walnut-deep); color: var(--on-walnut-2); }
 .evalbar { position: relative; width: 0.7rem; background: var(--dial); border-radius: 4px; overflow: hidden; margin-block: 2.1rem; }
 .evalbar__white { position: absolute; inset: 0; background: var(--enamel); transform-origin: bottom; transition: transform 320ms var(--ease-out); }
 .evalbar--flipped .evalbar__white { transform-origin: top; }
@@ -364,12 +372,12 @@ p { text-wrap: pretty; }
 .controls button:disabled { opacity: 0.35; cursor: default; }
 .controls__flip { margin-left: auto; }
 
-.moves { list-style: none; margin: 0; padding: 0; max-height: 26rem; overflow-y: auto; font-family: var(--mono); font-size: 0.85rem; border-top: 1px solid var(--walnut-rule); }
-.moves__pair { display: grid; grid-template-columns: 2.8rem 1fr 1fr; border-bottom: 1px solid rgb(106 70 51 / 0.45); }
-.moves__no { color: var(--on-walnut-3); padding: 0.45rem 0.5rem; }
+.moves { --row: 2.25rem; position: relative; list-style: none; margin: 0; padding: 0; max-height: calc(var(--row) * 12); overflow-y: auto; font-family: var(--mono); font-size: 0.85rem; border-top: 1px solid var(--walnut-rule); }
+.moves__pair { display: grid; grid-template-columns: 2.8rem 1fr 1fr; height: var(--row); border-bottom: 1px solid rgb(106 70 51 / 0.45); }
+.moves__no { color: var(--on-walnut-3); padding: 0 0.5rem; align-self: center; }
 .moves__move {
-  border: 0; background: transparent; cursor: pointer; text-align: left; padding: 0.45rem 0.5rem; font-family: inherit; font-size: inherit;
-  display: flex; gap: 0.4rem; align-items: baseline;
+  border: 0; background: transparent; cursor: pointer; text-align: left; padding: 0 0.5rem; font-family: inherit; font-size: inherit;
+  display: flex; gap: 0.4rem; align-items: center;
 }
 .moves__move:hover { background: rgb(255 255 255 / 0.04); }
 .moves__move.is-current { background: var(--enamel); color: var(--dial); }
@@ -422,5 +430,5 @@ p { text-wrap: pretty; }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; }
-  .dial__hand { animation: none; }
+  .dial__hand, .plate__hand { animation: none !important; }
 }

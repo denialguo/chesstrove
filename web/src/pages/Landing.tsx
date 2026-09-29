@@ -18,10 +18,6 @@ export function Landing() {
       <main>
         <section className="hero" aria-labelledby="hero-title">
           <h1 id="hero-title" className="hero__title">Every game you’ve played, searched for the moves worth keeping.</h1>
-          <p className="hero__lede">
-            Smothered mates, underpromotions, the only winning move you found. ChessTrove reads your whole
-            Chess.com or Lichess history and shows you where they happened.
-          </p>
 
           <div className="case case--landing">
             <div className="case__plungers">

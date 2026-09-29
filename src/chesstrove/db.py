@@ -563,7 +563,8 @@ def engine_label_rows(conn: psycopg.Connection, label: str, config_id: int, blun
                       AND substr(m.uci, 3, 2) = substr(prev.uci, 3, 2)) AS is_recapture,
                      {_expected(scale, 'm.color', 'b.score_cp', 'b.mate', 'b.wdl')} AS before,
                      {_expected(scale, 'm.color', 'a.score_cp', 'a.mate', 'a.wdl')} AS after,
-                     abs(coalesce(b.score_cp, 0) - coalesce(a.score_cp, 0)) AS cp_swing
+                     abs(coalesce(b.score_cp, 0) - coalesce(a.score_cp, 0)) AS cp_swing,
+                     b.score_cp AS cp_before, b.mate AS mate_before, a.score_cp AS cp_after, a.mate AS mate_after
               FROM moves m
               JOIN engine_positions b ON b.config_id = %(config)s AND b.game_id = m.game_id AND b.position = m.ply - 1
               JOIN engine_positions a ON a.config_id = %(config)s AND a.game_id = m.game_id AND a.position = m.ply
@@ -573,6 +574,7 @@ def engine_label_rows(conn: psycopg.Connection, label: str, config_id: int, blun
                    mv.engine_choice, mv.is_capture, mv.is_check, mv.is_recapture,
                    round(mv.before, 3) AS expected_before, round(mv.after, 3) AS expected_after,
                    round(mv.before - mv.after, 3) AS expected_drop {extra_cols},
+                   mv.cp_before, mv.mate_before, mv.cp_after, mv.mate_after,
                    mv.fen_before, mv.fen_after, g.initial_fen,
                    g.played_at, g.white, g.black, g.result, g.source, g.external_id
             FROM mv JOIN games g ON g.id = mv.game_id {extra_join}

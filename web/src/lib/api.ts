@@ -25,6 +25,8 @@ export interface LabelRow {
   expected_before: number; expected_after: number; expected_drop: number; runner_up?: string;
   best_line?: number; runner_up_line?: number; played_at: string | null; white: string; black: string;
   result: string; fen_before: string | null; fen_after: string; initial_fen: string | null;
+  is_capture: boolean; is_check: boolean;
+  cp_before: number | null; mate_before: number | null; cp_after: number | null; mate_after: number | null;
 }
 export interface Move { ply: number; color: "w" | "b"; san: string; uci: string; fen_after: string; is_check: boolean }
 export interface EnginePosition { position: number; score_cp: number | null; mate: number | null; best_uci: string | null }

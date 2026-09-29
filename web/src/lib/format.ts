@@ -28,3 +28,15 @@ export function timeControl(tc: string | null) {
   const baseLabel = Number.isInteger(minutes) ? `${minutes}` : `${Math.round(base)}s`;
   return inc ? `${baseLabel}+${inc}` : `${baseLabel} min`;
 }
+
+/** An engine score from the mover's side: "+1.8", "−0.4", "M3" (mover mates), "−M2" (mover gets mated), "#". */
+export function evalText(cp: number | null, mate: number | null, color: "w" | "b") {
+  const sign = color === "w" ? 1 : -1;
+  if (mate !== null) {
+    if (mate === 0) return "#";
+    const pov = mate * sign;
+    return pov > 0 ? `M${pov}` : `−M${-pov}`;
+  }
+  const pov = ((cp ?? 0) * sign) / 100;
+  return `${pov > 0 ? "+" : pov < 0 ? "−" : ""}${Math.abs(pov).toFixed(1)}`;
+}

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useSearchParams } from "react-router-dom";
 import { ArrowUpDown, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, ExternalLink } from "lucide-react";
 import { Board } from "../components/Board";
+import { Digits } from "../components/Digits";
 import { TopBar } from "../components/TopBar";
 import { api, PLATFORM_NAME, sourceUrl, type EnginePosition, type GameDetail, type Platform } from "../lib/api";
 import { formatDate, moveLabel, timeControl } from "../lib/format";
@@ -52,8 +53,9 @@ export function Game() {
   // keep the current move in view inside the scrolling move list (not the page)
   useEffect(() => {
     const list = movesRef.current;
-    const current = list?.querySelector<HTMLElement>(".is-current");
-    if (list && current) list.scrollTop = current.offsetTop - list.offsetTop - list.clientHeight / 2;
+    const row = list?.querySelector<HTMLElement>(".is-current")?.closest("li");
+    // scroll by whole rows so no row is ever sliced at the top edge; the current row sits mid-list
+    if (list && row) list.scrollTop = row.offsetTop - Math.floor(list.clientHeight / row.offsetHeight / 2) * row.offsetHeight;
   }, [ply, game]);
 
   const eventsByPly = useMemo(() => {
@@ -99,9 +101,9 @@ export function Game() {
             </div>
           )}
           <div className="viewer__stack">
-            <PlayerPlate {...top} />
+            <PlayerPlate {...top} toMove={whiteToMove === flipped} />
             <Board fen={fen} orientation={orientation} lastMove={move?.uci} check={move?.is_check} />
-            <PlayerPlate {...bottom} />
+            <PlayerPlate {...bottom} toMove={whiteToMove === !flipped} />
           </div>
         </div>
 
@@ -151,11 +153,18 @@ export function Game() {
   );
 }
 
-function PlayerPlate({ name, rating }: { name: string; rating: number | null }) {
+/** Each side's plate is one face of the clock: its hand runs while that side is to move. */
+function PlayerPlate({ name, rating, toMove }: { name: string; rating: number | null; toMove: boolean }) {
   return (
-    <div className="plate">
-      <span className="plate__name">{name}</span>
-      {rating && <span className="plate__rating num">{rating}</span>}
+    <div className={`plate ${toMove ? "plate--to-move" : ""}`}>
+      <svg className="plate__dial" viewBox="0 0 32 32" aria-hidden="true">
+        <circle cx="16" cy="16" r="15.5" className="plate__bezel" />
+        <circle cx="16" cy="16" r="13.5" className="plate__enamel" />
+        <g className="plate__hand"><line x1="16" y1="17.5" x2="16" y2="5" /></g>
+        <circle cx="16" cy="16" r="1.6" className="plate__pin" />
+      </svg>
+      <span className="plate__name">{name}{toMove && <span className="visually-hidden"> (to move)</span>}</span>
+      {rating && <Digits value={rating} places={1} className="plate__rating" />}
     </div>
   );
 }
