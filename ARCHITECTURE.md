@@ -37,12 +37,13 @@ src/chesstrove/
   db.py                all SQL (plain psycopg 3, no ORM)
   schema.sql           full schema, idempotent
   cli.py               chesstrove init-db | import-pgn | import-chesscom | imports | games | game |
-                                  events | detectors | reanalyze
+                                  events | detectors | reanalyze | serve
+  api.py               FastAPI over the same functions; long jobs return 202 + id and run in the background
 scripts/benchmark.py
 tests/                 real Postgres (embedded via pgserver, or $CHESSTROVE_TEST_DATABASE_URL)
 ```
 
-Added in later milestones: `importers/lichess.py`, `api.py`.
+Added in later milestones: `importers/lichess.py`.
 
 The importer "interface" is a convention rather than an ABC: an importer is any iterable of
 `CanonicalGame | ParseFailure`. Chess.com and Lichess both serve PGN, so they fetch, then call
@@ -131,8 +132,10 @@ the event's color against `games.white/black`.
 3. **Done: detector framework plus the 8 detectors.** Detectors run inside `store_game` on the same replay.
    Also: `analysis_runs`, per-game version tracking, `reanalyze`, `events` search, and positive /
    near-miss / edge-case fixtures per detector in `tests/detectors/`.
-4. **Query surface:** `events` / `games` list and filter endpoints (type, color, date, player) as a small
-   REST API alongside the CLI.
+4. **Done: REST API.** `POST /imports/pgn` (raw PGN body), `POST /imports/chesscom`, `GET /imports[/{id}]`,
+   `GET /games[/{id}]`, `GET /events?type&color&player&since&until&game_id`, `GET /detectors`,
+   `POST /analysis-runs`, `GET /analysis-runs[/{id}]`. Localhost only, no auth. A job whose server dies mid-run
+   stays `running`; re-running the import is safe.
 5. **Lichess import,** then profiling on a real 10k+ game history.
 
 ## Performance

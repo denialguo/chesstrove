@@ -17,15 +17,18 @@ from chesstrove.models import CanonicalGame
 BATCH_SIZE = 500  # games per transaction
 
 
-def import_pgn(conn: psycopg.Connection, text: str, source_ref: str) -> int:
+def import_pgn(conn: psycopg.Connection, text: str, source_ref: str, import_id: int | None = None) -> int:
     """Import every game in a PGN string. Returns the import id."""
-    return run_import(conn, read_pgn(text), "pgn", source_ref)
+    return run_import(conn, read_pgn(text), "pgn", source_ref, import_id)
 
 
-def run_import(conn: psycopg.Connection, items: Iterable[CanonicalGame | ParseFailure], source: str, source_ref: str) -> int:
+def run_import(
+    conn: psycopg.Connection, items: Iterable[CanonicalGame | ParseFailure], source: str, source_ref: str,
+    import_id: int | None = None,
+) -> int:
     """Resumable by construction: re-running the same input skips already-stored games
     (dedupe happens before replay), so an interrupted import just needs to be run again."""
-    with tracked_import(conn, source, source_ref) as import_id, tracked_run(conn) as run:
+    with tracked_import(conn, source, source_ref, import_id=import_id) as import_id, tracked_run(conn) as run:
         store_items(conn, import_id, run, items)
     return import_id
 
@@ -36,6 +39,7 @@ def import_chesscom(
     user: str = "me",
     fetch: Callable[[str], Any] = chesscom.fetch_json,
     now: datetime | None = None,
+    import_id: int | None = None,
 ) -> int:
     """Import a Chess.com history, one monthly archive at a time.
 
@@ -45,10 +49,10 @@ def import_chesscom(
     """
     username = username.lower()
     account_id = db.ensure_account(conn, user, "chesscom", username)
-    months_done = set(db.last_resume_state(conn, "chesscom", username).get("months_done", []))
+    months_done = db.chesscom_months_done(conn, username)
     current_month = (now or datetime.now(UTC)).strftime("%Y/%m")
 
-    with tracked_import(conn, "chesscom", username, account_id) as import_id, tracked_run(conn) as run:
+    with tracked_import(conn, "chesscom", username, account_id, import_id) as import_id, tracked_run(conn) as run:
         db.set_resume_state(conn, import_id, {"months_done": sorted(months_done)})
         for url in chesscom.archive_urls(username, fetch):
             month = chesscom.month_of(url)
@@ -67,12 +71,18 @@ def import_chesscom(
 
 
 @contextmanager
-def tracked_import(conn: psycopg.Connection, source: str, source_ref: str, account_id: int | None = None) -> Iterator[int]:
-    """Create an imports row; mark it completed or failed when the block exits."""
-    import_id = db.start_import(conn, source, source_ref, account_id)
+def tracked_import(
+    conn: psycopg.Connection, source: str, source_ref: str, account_id: int | None = None, import_id: int | None = None
+) -> Iterator[int]:
+    """Create (or adopt a pre-created) imports row; mark it completed or failed when the block exits."""
+    if import_id is None:
+        import_id = db.start_import(conn, source, source_ref, account_id)
+    elif account_id is not None:
+        db.set_import_account(conn, import_id, account_id)
     try:
         yield import_id
-    except BaseException:
+    except BaseException as e:
+        db.record_progress(conn, import_id, errors=[{"error": f"import aborted: {type(e).__name__}: {e}"}])
         db.finish_import(conn, import_id, "failed")
         raise
     db.finish_import(conn, import_id, "completed")

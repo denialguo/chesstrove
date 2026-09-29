@@ -17,6 +17,7 @@ uv run chesstrove detectors                 # what each detector finds, and its 
 uv run chesstrove events --type UNDERPROMOTION
 uv run chesstrove events --type MISSED_MATE_IN_ONE --player myname --since 2024-01-01
 uv run chesstrove reanalyze                 # after bumping/adding a detector: redoes only what's stale
+uv run chesstrove serve                     # REST API on 127.0.0.1:8000, interactive docs at /docs
 
 uv run pytest                              # spins up an embedded Postgres; no setup needed
 uv run scripts/benchmark.py --db

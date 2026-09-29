@@ -38,6 +38,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--limit", type=int, default=50)
     p.add_argument("--offset", type=int, default=0)
     sub.add_parser("detectors", help="list detectors and their versions")
+    p = sub.add_parser("serve", help="run the REST API (docs at /docs)")
+    p.add_argument("--port", type=int, default=8000)
     p = sub.add_parser("reanalyze", help="re-run detectors over stored games (only stale games unless --all)")
     p.add_argument("--detector", action="append", help="repeatable; default: all detectors")
     p.add_argument("--all", action="store_true", help="redo every game, not just stale ones")
@@ -70,6 +72,10 @@ def main(argv: list[str] | None = None) -> int:
                                       args.game, args.limit, args.offset))
             case "detectors":
                 _print([{"id": d.id, "version": d.version, "definition": (d.__doc__ or "").strip()} for d in DETECTORS])
+            case "serve":
+                import uvicorn
+
+                uvicorn.run("chesstrove.api:app", host="127.0.0.1", port=args.port)  # no auth: localhost only
             case "reanalyze":
                 _print(db.get_analysis_run(conn, reanalyze(conn, args.detector, force=args.all)))
     return 0

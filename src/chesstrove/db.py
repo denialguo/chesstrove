@@ -24,7 +24,8 @@ MOVE_COLUMNS = (
 def connect(dsn: str | None = None) -> psycopg.Connection[dict[str, Any]]:
     """Autocommit connection; callers group work with `with conn.transaction():`."""
     dsn = dsn or os.environ.get("CHESSTROVE_DATABASE_URL", "postgresql:///chesstrove")
-    return psycopg.connect(dsn, autocommit=True, row_factory=dict_row)
+    # UTC session so timestamps read back the same regardless of the server's local zone
+    return psycopg.connect(dsn, autocommit=True, row_factory=dict_row, options="-c timezone=UTC")
 
 
 def init_schema(conn: psycopg.Connection) -> None:
@@ -75,13 +76,18 @@ def set_resume_state(conn: psycopg.Connection, import_id: int, state: dict) -> N
     conn.execute("UPDATE imports SET resume_state = %s WHERE id = %s", (Jsonb(state), import_id))
 
 
-def last_resume_state(conn: psycopg.Connection, source: str, source_ref: str) -> dict:
-    """Each import stores cumulative progress, so the latest one for this source is the whole story."""
-    row = conn.execute(
-        "SELECT resume_state FROM imports WHERE source = %s AND source_ref = %s ORDER BY id DESC LIMIT 1",
-        (source, source_ref),
-    ).fetchone()
-    return row["resume_state"] if row else {}
+def chesscom_months_done(conn: psycopg.Connection, username: str) -> set[str]:
+    """Union over every import of this account, so a new, still-empty import row can't hide past progress."""
+    rows = conn.execute(
+        """SELECT DISTINCT jsonb_array_elements_text(resume_state->'months_done') AS month
+           FROM imports WHERE source = 'chesscom' AND source_ref = %s""",
+        (username,),
+    ).fetchall()
+    return {r["month"] for r in rows}
+
+
+def set_import_account(conn: psycopg.Connection, import_id: int, account_id: int) -> None:
+    conn.execute("UPDATE imports SET account_id = %s WHERE id = %s", (account_id, import_id))
 
 
 def finish_import(conn: psycopg.Connection, import_id: int, status: str) -> None:
@@ -166,6 +172,14 @@ def record_run_progress(conn: psycopg.Connection, run_id: int, games: int, event
 
 def finish_analysis_run(conn: psycopg.Connection, run_id: int, status: str) -> None:
     conn.execute("UPDATE analysis_runs SET status = %s, finished_at = now() WHERE id = %s", (status, run_id))
+
+
+def set_run_detectors(conn: psycopg.Connection, run_id: int, detector_versions: dict[str, int]) -> None:
+    conn.execute("UPDATE analysis_runs SET detector_versions = %s WHERE id = %s", (Jsonb(detector_versions), run_id))
+
+
+def list_analysis_runs(conn: psycopg.Connection, limit: int = 50) -> list[dict]:
+    return conn.execute("SELECT * FROM analysis_runs ORDER BY id DESC LIMIT %s", (limit,)).fetchall()
 
 
 def get_analysis_run(conn: psycopg.Connection, run_id: int) -> dict | None:

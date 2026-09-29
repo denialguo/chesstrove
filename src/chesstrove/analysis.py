@@ -36,10 +36,18 @@ def analyze(game: CanonicalGame, detectors: Sequence[Detector]) -> tuple[list[Mo
 
 
 @contextmanager
-def tracked_run(conn: psycopg.Connection, detectors: Sequence[Detector] | None = None) -> Iterator[Run]:
-    """An analysis_runs row recording exactly which detector versions produced its events. Default: all."""
+def tracked_run(
+    conn: psycopg.Connection, detectors: Sequence[Detector] | None = None, run_id: int | None = None
+) -> Iterator[Run]:
+    """An analysis_runs row recording exactly which detector versions produced its events. Default: all.
+    A pre-created row (run_id) is adopted and its detector list set to what actually runs."""
     detectors = select(None) if detectors is None else detectors
-    run = Run(db.start_analysis_run(conn, {d.id: d.version for d in detectors}), detectors)
+    versions = {d.id: d.version for d in detectors}
+    if run_id is None:
+        run_id = db.start_analysis_run(conn, versions)
+    else:
+        db.set_run_detectors(conn, run_id, versions)
+    run = Run(run_id, detectors)
     try:
         yield run
     except BaseException:
@@ -48,7 +56,9 @@ def tracked_run(conn: psycopg.Connection, detectors: Sequence[Detector] | None =
     db.finish_analysis_run(conn, run.id, "completed")
 
 
-def reanalyze(conn: psycopg.Connection, detector_ids: Sequence[str] | None = None, force: bool = False) -> int:
+def reanalyze(
+    conn: psycopg.Connection, detector_ids: Sequence[str] | None = None, force: bool = False, run_id: int | None = None
+) -> int:
     """Re-run detectors over stored games from their stored moves. No download, no PGN parsing.
 
     By default only games whose recorded version of any selected detector differs from the current one
@@ -60,7 +70,7 @@ def reanalyze(conn: psycopg.Connection, detector_ids: Sequence[str] | None = Non
     chosen = select(detector_ids)
     if not detector_ids and not force:
         chosen = tuple(d for d in chosen if db.has_stale_games(conn, d.id, d.version))
-    with tracked_run(conn, chosen) as run:
+    with tracked_run(conn, chosen, run_id) as run:
         if not chosen:
             return run.id
         after = 0
