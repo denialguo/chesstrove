@@ -29,12 +29,28 @@ def _show(score: chess.engine.Score | None) -> dict | None:
 
 def annotate(conn: psycopg.Connection, events: list[dict], config_id: int | None = None) -> list[dict]:
     """Adds `engine_analysis` to each event: None if its game hasn't been analyzed under the config
-    (default: the config covering the most games)."""
+    (default: the config covering the most games). Probes stored under other (e.g. deeper) configs are
+    attached separately as `deeper_verification`, each labelled with its own config."""
     config = db.get_engine_config(conn, config_id) if config_id else db.default_engine_config(conn)
     if config is None or not events:
         return [{**e, "engine_analysis": None} for e in events]
-    rows = db.engine_facts_for_moves(conn, config["id"], [(e["game_id"], e["ply"]) for e in events])
-    return [{**e, "engine_analysis": _analysis(config, rows.get((e["game_id"], e["ply"])))} for e in events]
+    keys = [(e["game_id"], e["ply"]) for e in events]
+    rows = db.engine_facts_for_moves(conn, config["id"], keys)
+    others = db.other_config_probes(conn, config["id"], [(g, p - 1) for g, p in keys])
+    out = []
+    for e in events:
+        analysis = _analysis(config, rows.get((e["game_id"], e["ply"])))
+        if analysis is not None:
+            deeper = _deeper(others.get((e["game_id"], e["ply"] - 1), []), rows[(e["game_id"], e["ply"])])
+            if deeper:
+                analysis["deeper_verification"] = deeper
+        out.append({**e, "engine_analysis": analysis})
+    return out
+
+
+def _config_label(config: dict) -> dict:
+    return {"id": config["id"], "engine": config["engine_name"], config["limit_kind"]: config["limit_value"],
+            "multipv": config["multipv"]}
 
 
 def _analysis(config: dict, row: dict | None) -> dict | None:
@@ -47,8 +63,7 @@ def _analysis(config: dict, row: dict | None) -> dict | None:
     lines = row["multipv"] or []
 
     out: dict[str, Any] = {
-        "config": {"id": config["id"], "engine": config["engine_name"],
-                   config["limit_kind"]: config["limit_value"], "multipv": config["multipv"]},
+        "config": _config_label(config),
         "eval_before": _show(before),
         "eval_after": _show(after),
         "eval_loss_cp": before.score() - after.score() if after and not before.is_mate() and not after.is_mate() else None,
@@ -58,24 +73,46 @@ def _analysis(config: dict, row: dict | None) -> dict | None:
         "matches_engine_choice": played == row["best_uci"],
         "rank_in_engine_lines": next((i + 1 for i, l in enumerate(lines) if l["uci"] == played), None),
     }
-    if row["vs_queen"]:  # B. underpromotion vs. queening on the same square, scored in one search
-        scores = {r["uci"]: _pov(r["score_cp"], r["mate"], flip) for r in row["vs_queen"]}
-        queen = played[:4] + "q"
-        if played in scores and queen in scores:
-            out["vs_queen"] = {"evaluation": _show(scores[played]), "queen_promotion_evaluation": _show(scores[queen]),
-                               "budget": row["vs_queen_budget"]}
-            out["better_than_queen"] = scores[played] > scores[queen]
-    if row["all_moves"] is not None:  # A. the played move vs. every legal move, scored in one search
-        out.update(_best_move_verdict(row, played, flip))
+    out.update(_verdicts(played, flip, row["vs_queen"], row["vs_queen_budget"],
+                         row["all_moves"], row["all_moves_list"], row["all_moves_budget"]))
     return out
 
 
-def _best_move_verdict(row: dict, played: str, flip: bool) -> dict:
+def _deeper(probes: list[dict], row: dict) -> list[dict]:
+    """The same two questions answered under other configs (strongest first)."""
+    by_config: dict[int, dict] = {}
+    for p in probes:
+        by_config.setdefault(p["config"]["id"], {"config": p["config"]})[p["kind"]] = p
+    blocks = []
+    for entry in by_config.values():
+        q, a = entry.get("vs_queen"), entry.get("all_moves")
+        verdict = _verdicts(row["uci"], row["color"] == "b",
+                            q and q["results"], q and q["budget"], a and a["results"], a and a["moves"], a and a["budget"])
+        if verdict:
+            blocks.append({"config": _config_label(entry["config"]), **verdict})
+    return blocks
+
+
+def _verdicts(played: str, flip: bool, vs_queen: list | None, vs_queen_budget: dict | None,
+              all_moves: list | None, all_moves_list: list | None, all_moves_budget: dict | None) -> dict:
+    out: dict[str, Any] = {}
+    if vs_queen:  # B. underpromotion vs. queening on the same square, scored in one search
+        scores = {r["uci"]: _pov(r["score_cp"], r["mate"], flip) for r in vs_queen}
+        queen = played[:4] + "q"
+        if played in scores and queen in scores:
+            out["vs_queen"] = {"evaluation": _show(scores[played]), "queen_promotion_evaluation": _show(scores[queen]),
+                               "budget": vs_queen_budget}
+            out["better_than_queen"] = scores[played] > scores[queen]
+    if all_moves is not None:  # A. the played move vs. every legal move, scored in one search
+        out.update(_best_move_verdict(played, flip, all_moves, all_moves_list, all_moves_budget))
+    return out
+
+
+def _best_move_verdict(played: str, flip: bool, results: list, legal: list, budget: dict) -> dict:
     """is_best_move / tied_for_best_move / unique_best_move, only when every legal move got a score."""
-    scores = {r["uci"]: _pov(r["score_cp"], r["mate"], flip) for r in row["all_moves"]}
-    complete = set(scores) == set(row["all_moves_list"]) and played in scores
-    verdict: dict[str, Any] = {"all_moves": {"legal_moves": len(row["all_moves_list"]), "scored": len(scores),
-                                             "budget": row["all_moves_budget"]}}
+    scores = {r["uci"]: _pov(r["score_cp"], r["mate"], flip) for r in results}
+    complete = set(scores) == set(legal) and played in scores
+    verdict: dict[str, Any] = {"all_moves": {"legal_moves": len(legal), "scored": len(scores), "budget": budget}}
     if not complete:  # never guess: an unscored legal move might be better
         return {**verdict, "is_best_move": None, "tied_for_best_move": None, "unique_best_move": None,
                 "played_move_rank": None}

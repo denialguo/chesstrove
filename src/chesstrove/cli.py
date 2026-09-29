@@ -72,7 +72,14 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--blunder", type=float, default=labels.Thresholds().blunder, help="expected-score drop")
     p.add_argument("--winning", type=float, default=labels.Thresholds().winning)
     p.add_argument("--not-winning", type=float, default=labels.Thresholds().not_winning)
+    p.add_argument("--scale", choices=labels.SCALES, default="lichess",
+                   help="lichess: human-calibrated win%% curve (default); stockfish: engine WDL (much steeper)")
+    p.add_argument("--include-recaptures", action="store_true", help="ONLY_WINNING_MOVE: keep obvious recaptures")
     p.add_argument("--limit", type=int, default=20)
+    p = esub.add_parser("verify-underpromotions", help="re-ask both underpromotion questions at a stronger setting")
+    p.add_argument("--nodes", type=int, default=1_000_000, help="nodes per move (default 1,000,000)")
+    p.add_argument("--workers", type=int, default=engine.default_workers())
+    p.add_argument("--stockfish")
     p = esub.add_parser("verify-only-moves", help="two-line searches where ONLY_WINNING_MOVE can apply (resumable)")
     p.add_argument("--player", help="only this username's moves (fewer candidates)")
     p.add_argument("--config", type=int)
@@ -132,7 +139,16 @@ def main(argv: list[str] | None = None) -> int:
                     return 0
                 if args.engine_command == "labels":
                     t = labels.Thresholds(args.blunder, args.winning, args.not_winning)
-                    _print(labels.query(conn, args.type, t, args.config, args.player, args.limit))
+                    _print(labels.query(conn, args.type, t, args.config, args.player, args.limit, args.scale,
+                                        args.include_recaptures))
+                    return 0
+                if args.engine_command == "verify-underpromotions":
+                    try:
+                        _print(engine.verify_underpromotions(conn, engine.EngineSettings(limit_value=args.nodes),
+                                                             args.stockfish, args.workers))
+                    except FileNotFoundError as e:
+                        print(e, file=sys.stderr)
+                        return 1
                     return 0
                 if args.engine_command == "verify-only-moves":
                     def show(p: dict) -> None:

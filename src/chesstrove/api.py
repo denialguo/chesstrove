@@ -168,10 +168,14 @@ def engine_labels(
     blunder: Annotated[float, Query(gt=0, le=1)] = labels.Thresholds().blunder,
     winning: Annotated[float, Query(gt=0, le=1)] = labels.Thresholds().winning,
     not_winning: Annotated[float, Query(ge=0, lt=1)] = labels.Thresholds().not_winning,
+    scale: Literal["lichess", "stockfish"] = "lichess",
+    include_recaptures: bool = False,
     limit: Limit = 50,
 ) -> list[dict]:
-    """Derived from stored evaluations at query time: change a threshold and everything relabels instantly."""
-    return labels.query(c, type, labels.Thresholds(blunder, winning, not_winning), config, player, limit)
+    """Derived from stored evaluations at query time: change a threshold or scale and everything relabels
+    instantly."""
+    return labels.query(c, type, labels.Thresholds(blunder, winning, not_winning), config, player, limit,
+                        scale, include_recaptures)
 
 
 @app.get("/engine-runs")

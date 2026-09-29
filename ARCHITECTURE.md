@@ -257,29 +257,44 @@ engine_move_probes (config_id, game_id, position, moves text[],  -- restricted s
 ### Engine-derived labels (built)
 
 Labels are **derived at query time** from stored evaluations ([labels.py](src/chesstrove/labels.py)).
-Thresholds are parameters, not stored state: `--blunder 0.25` relabels the whole history instantly and
-never re-runs Stockfish.
+Thresholds and scale are parameters, not stored state: `--blunder 0.25` or `--scale stockfish` relabels the
+whole history in seconds and never re-runs Stockfish.
 
-All labels use **expected score** from the mover's point of view: (W + D/2) / 1000 from Stockfish's own WDL
-model. Delivering mate is 1.0 and stalemate is 0.5. It's scale-robust in a way raw centipawns aren't: +3 → +6
-barely moves it, 0 → +3 moves it a lot. Thresholds are a first calibration, to be tuned against real results.
+Every label uses **expected score** (0 to 1, the mover's point of view), on one of two scales:
+
+| Scale | Formula | Calibrated to |
+|---|---|---|
+| `lichess` (default) | 1 / (1 + e^(−0.00368208 · cp)); forced mate 1 or 0 | human games |
+| `stockfish` | (W + D/2) / 1000 from Stockfish's WDL | engine-strength play |
+
+**Why the default is `lichess`, measured on a real 176,056-move history:**
+- **Blunders:** the Stockfish scale labelled 8.9% of moves `BLUNDER`, the lichess scale 2.8%.
+- **Missed wins:** 3.8% vs 0.31%.
+- **Unrankable ties:** the Stockfish scale put 1,687 moves at the maximum drop, so they couldn't be ranked
+  against each other.
+
+Stockfish's WDL is right about engines, for which +1.5 is nearly always a win, but that's far too steep for
+people. So ordinary human swings looked like blunders.
 
 | Label | Definition (defaults) |
 |---|---|
 | `BLUNDER` | expected score before − after ≥ 0.30 |
 | `MISSED_WIN` | before ≥ 0.90 (clearly winning, including forced mates) and after ≤ 0.60 |
-| `ONLY_WINNING_MOVE` | the best line ≥ 0.90, the second-best line ≤ 0.60, and the mover played the best line |
+| `ONLY_WINNING_MOVE` | best line ≥ 0.90, second-best line ≤ 0.60, the mover played the best line, and it isn't a recapture on the square the opponent just captured on (`--include-recaptures` to keep those) |
+
+Rows carry `is_capture`, `is_check` and `is_recapture`. Ties are broken by centipawn swing (drops), or quiet moves
+first (only-moves). Without the recapture rule, the first run found 3,774 "only winning moves" for one player,
+and they were mostly obvious take-backs like `Kxh1`. With it (and the lichess scale), there were 293, 31 of them quiet.
 
 `ONLY_WINNING_MOVE` needs the second-best line, which a MultiPV-1 history doesn't have. Rather than paying
 MultiPV 2 on every position, it's two-stage: `chesstrove engine verify-only-moves` runs a `top_two` probe
 (MultiPV 2, 2× the per-position budget, WDL per line) **only** where it can apply: the mover was clearly
-winning, played the engine's choice, and had more than one legal move. It uses the config's own settings, and
-refuses a binary that reports a different engine. It's resumable. The label is then a query over those probes,
-so its thresholds are adjustable too.
+winning on either scale, played the engine's choice, and had more than one legal move. It uses the config's
+own settings, refuses a binary that reports a different engine, and is resumable.
+Measured: 42,660 candidates (12% of positions) in 270 s on 13 workers.
 
-CLI: `chesstrove engine labels --type BLUNDER|MISSED_WIN|ONLY_WINNING_MOVE [--player] [--blunder] [--winning]
-[--not-winning]`. API: `GET /engine-labels?type=…`. "Biggest blunders of my career" is `BLUNDER`
-sorted by drop (the default order).
+CLI: `chesstrove engine labels --type BLUNDER|MISSED_WIN|ONLY_WINNING_MOVE [--player] [--scale]
+[--blunder] [--winning] [--not-winning] [--include-recaptures]`. API: `GET /engine-labels?type=…`.
 
 ### Underpromotion: two separate questions
 
@@ -311,6 +326,14 @@ events carry only `matches_engine_choice` (the played move is the unrestricted s
 
 Probes run inside the same per-game task, after the game's positions, each with the hash cleared, so the
 position results are identical whether or not probes ran.
+
+**Deeper verification.** `chesstrove engine verify-underpromotions --nodes 1000000` re-asks both questions
+under a stronger config. The results are stored under that config's own id, next to (never over) the
+full-history verdict, and shown as `engine_analysis.deeper_verification`. On a real history (13 underpromotions
+by one player, 25k → 1M nodes per move, 55 s total), 3 verdicts changed. One `c1=N+` went from rank 2 of
+30 to **unique best**, a desperate defense in a lost position. A near-tie (`exf1=R+` +7.25 vs `=Q` +7.27) stayed
+"unique best among all moves, not better than queening". Both searches are within noise of equal there, which
+is exactly why both numbers are reported and not merged.
 
 **Cost, measured on 19 real underpromotions** (median 30 legal moves, max 44): the all-moves search takes
 0.17 s median (0.99 s max) at 25k nodes per move, 0.61 s median (3.95 s max) at 100k. That's 4.7 s and 17.5 s in total

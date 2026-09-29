@@ -2,9 +2,13 @@
 evaluations. Thresholds are parameters, not stored: changing .30 to .25 relabels everything instantly
 and never re-runs Stockfish.
 
-Expected score = (W + D/2) / 1000 from Stockfish's own WDL model, from the mover's point of view.
-Delivering mate counts as 1.0, stalemate 0.5. Scale-robust in a way centipawns aren't: +3 -> +6 barely
-moves it, 0 -> +3 moves it a lot.
+Expected score (0..1, the mover's point of view) comes on two scales:
+  lichess (default)  Lichess's win% curve on centipawns, fitted to human games.
+  stockfish          (W + D/2) / 1000 from Stockfish's WDL model, calibrated to engine-strength play. So
+                     steep that ordinary human swings look like blunders: on a real 176k-move history it
+                     labelled 8.9% of moves BLUNDER vs 2.8% on the lichess scale, and 1,687 moves tied at
+                     the maximum drop.
+Both are scale-robust in a way raw centipawns aren't: +3 -> +6 barely moves them, 0 -> +3 a lot.
 """
 
 from dataclasses import dataclass
@@ -16,6 +20,8 @@ from chesstrove import db
 
 Label = Literal["BLUNDER", "MISSED_WIN", "ONLY_WINNING_MOVE"]
 LABELS: tuple[Label, ...] = ("BLUNDER", "MISSED_WIN", "ONLY_WINNING_MOVE")
+Scale = Literal["lichess", "stockfish"]
+SCALES: tuple[Scale, ...] = ("lichess", "stockfish")
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,10 +38,14 @@ def query(
     config_id: int | None = None,
     player: str | None = None,
     limit: int = 50,
+    scale: Scale = "lichess",
+    include_recaptures: bool = False,
 ) -> list[dict]:
     """Labelled moves, most dramatic first (largest expected-score drop; for ONLY_WINNING_MOVE, the
-    biggest gap between the only winning move and the runner-up)."""
+    biggest gap between the only winning move and the runner-up, quiet moves first among equals).
+    ONLY_WINNING_MOVE skips recaptures on the square the opponent just captured on unless asked."""
     config = db.get_engine_config(conn, config_id) if config_id else db.default_engine_config(conn)
     if config is None:
         return []
-    return db.engine_label_rows(conn, label, config["id"], t.blunder, t.winning, t.not_winning, player, limit)
+    return db.engine_label_rows(conn, label, config["id"], t.blunder, t.winning, t.not_winning, player, limit,
+                                scale, include_recaptures)

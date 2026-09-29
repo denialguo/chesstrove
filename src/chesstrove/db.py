@@ -396,13 +396,47 @@ def status_summary(conn: psycopg.Connection, detector_versions: dict[str, int]) 
            FROM games g LEFT JOIN game_analysis a ON a.game_id = g.id""",
         (Jsonb(detector_versions),),
     ).fetchone()
-    engines = conn.execute(
+    engines = conn.execute(  # full-history configs only (probe-only verification configs have no runs)
         """SELECT c.id AS config_id, c.engine_name, c.limit_kind, c.limit_value, c.multipv,
                   count(s.game_id) AS games_done, coalesce(sum(s.positions), 0) AS positions_done
            FROM engine_configs c LEFT JOIN engine_game_status s ON s.config_id = c.id
+           WHERE EXISTS (SELECT 1 FROM engine_runs r WHERE r.config_id = c.id)
            GROUP BY c.id ORDER BY c.id""",
     ).fetchall()
     return {**totals, "engine": engines}
+
+
+def underpromotion_moves(conn: psycopg.Connection) -> list[tuple[int, int, str]]:
+    rows = conn.execute(
+        """SELECT e.game_id, e.ply, m.uci FROM events e JOIN moves m ON m.game_id = e.game_id AND m.ply = e.ply
+           WHERE e.type = 'UNDERPROMOTION' ORDER BY e.game_id, e.ply""",
+    ).fetchall()
+    return [(r["game_id"], r["ply"], r["uci"]) for r in rows]
+
+
+def probe_keys(conn: psycopg.Connection, config_id: int) -> set[tuple[int, int, str]]:
+    rows = conn.execute("SELECT game_id, position, kind FROM engine_move_probes WHERE config_id = %s", (config_id,))
+    return {(r["game_id"], r["position"], r["kind"]) for r in rows}
+
+
+def other_config_probes(conn: psycopg.Connection, base_config_id: int, positions: list[tuple[int, int]]) -> dict:
+    """Probes under configs other than `base_config_id` for (game_id, position), with each config's row,
+    strongest first. Keyed by (game_id, position) -> list of {config, kind, moves, results, budget}."""
+    if not positions:
+        return {}
+    rows = conn.execute(
+        """SELECT p.game_id, p.position, p.kind, p.moves, p.results, p.budget, row_to_json(c) AS config
+           FROM unnest(%(games)s::bigint[], %(positions)s::int[]) AS k(game_id, position)
+           JOIN engine_move_probes p ON p.game_id = k.game_id AND p.position = k.position
+           JOIN engine_configs c ON c.id = p.config_id
+           WHERE p.config_id <> %(base)s AND p.kind IN ('vs_queen', 'all_moves')
+           ORDER BY c.limit_kind, c.limit_value DESC, c.id""",
+        {"games": [g for g, _ in positions], "positions": [p for _, p in positions], "base": base_config_id},
+    ).fetchall()
+    out: dict = {}
+    for r in rows:
+        out.setdefault((r["game_id"], r["position"]), []).append(r)
+    return out
 
 
 def get_engine_config(conn: psycopg.Connection, config_id: int) -> dict | None:
@@ -441,46 +475,72 @@ def engine_facts_for_moves(conn: psycopg.Connection, config_id: int, moves: list
     return {(r["game_id"], r["ply"]): r for r in rows}
 
 
-def _expected(wdl: str, color: str) -> str:
-    """SQL: the mover's expected score from a White-POV {win, draw, loss} per-mille array."""
-    return (f"CASE WHEN {color} = 'w' THEN ({wdl}[1] + {wdl}[2] / 2.0) / 1000 "
-            f"ELSE ({wdl}[3] + {wdl}[2] / 2.0) / 1000 END")
+LICHESS_K = 0.00368208  # Lichess's win% curve, fitted to human games: win = 1 / (1 + exp(-k * cp))
 
 
-def _line_wdl(line: str) -> str:
-    return f"(ARRAY[({line}->'wdl'->>0)::int, ({line}->'wdl'->>1)::int, ({line}->'wdl'->>2)::int])"
+def _expected(scale: str, color: str, cp: str, mate: str, wdl: str) -> str:
+    """SQL: the mover's expected score (0..1) from stored White-POV values.
+
+    stockfish: (W + D/2) / 1000 from Stockfish's WDL (calibrated to engine-strength play: steep)
+    lichess:   Lichess's logistic curve on centipawns (calibrated to human games: gentler)
+    A forced mate is 1 or 0 on both; mate = 0 means the side to move is mated (only ever after a move,
+    so the mover delivered it: 1.0). Stalemate is stored as 0 cp (0.5 on the lichess scale).
+    """
+    mover_mates = f"CASE WHEN ({mate} > 0) = ({color} = 'w') THEN 1.0 ELSE 0.0 END"
+    if scale == "stockfish":
+        from_wdl = (f"CASE WHEN {color} = 'w' THEN ({wdl}[1] + {wdl}[2] / 2.0) / 1000 "
+                    f"ELSE ({wdl}[3] + {wdl}[2] / 2.0) / 1000 END")
+        return f"CASE WHEN {mate} = 0 THEN 1.0 WHEN {wdl} IS NOT NULL THEN {from_wdl} ELSE 0.5 END"
+    if scale == "lichess":
+        pov_cp = f"(CASE WHEN {color} = 'w' THEN {cp} ELSE -{cp} END)"
+        return (f"CASE WHEN {mate} = 0 THEN 1.0 WHEN {mate} IS NOT NULL THEN {mover_mates} "
+                f"ELSE 1 / (1 + exp(-{LICHESS_K} * {pov_cp})) END")
+    raise ValueError(f"unknown scale {scale!r}")
+
+
+def _line(scale: str, line: str, color: str) -> str:
+    """_expected for one line of a probe's jsonb results."""
+    wdl = f"(ARRAY[({line}->'wdl'->>0)::int, ({line}->'wdl'->>1)::int, ({line}->'wdl'->>2)::int])"
+    return _expected(scale, color, f"({line}->>'score_cp')::int", f"({line}->>'mate')::int", wdl)
 
 
 def engine_label_rows(conn: psycopg.Connection, label: str, config_id: int, blunder: float, winning: float,
-                      not_winning: float, player: str | None, limit: int) -> list[dict]:
-    first, second = _line_wdl("p.results->0"), _line_wdl("p.results->1")
+                      not_winning: float, player: str | None, limit: int, scale: str = "lichess",
+                      include_recaptures: bool = False) -> list[dict]:
+    first, second = _line(scale, "p.results->0", "mv.color"), _line(scale, "p.results->1", "mv.color")
     extra_join, extra_cols = "", ""
     if label == "BLUNDER":
-        where, order = "mv.before - mv.after >= %(blunder)s", "mv.before - mv.after DESC"
+        where, order = "mv.before - mv.after >= %(blunder)s", "mv.before - mv.after DESC, mv.cp_swing DESC"
     elif label == "MISSED_WIN":
-        where, order = "mv.before >= %(winning)s AND mv.after <= %(not_winning)s", "mv.before - mv.after DESC"
+        where, order = "mv.before >= %(winning)s AND mv.after <= %(not_winning)s", "mv.before - mv.after DESC, mv.cp_swing DESC"
     elif label == "ONLY_WINNING_MOVE":
         extra_join = """JOIN engine_move_probes p ON p.config_id = %(config)s AND p.game_id = mv.game_id
                           AND p.position = mv.ply - 1 AND p.kind = 'top_two'"""
-        extra_cols = f""", p.results->1->>'uci' AS runner_up,
-                          {_expected(first, 'mv.color')} AS best_line, {_expected(second, 'mv.color')} AS runner_up_line"""
+        extra_cols = f""", p.results->1->>'uci' AS runner_up, round({first}, 3) AS best_line,
+                          round({second}, 3) AS runner_up_line"""
         where = f"""jsonb_array_length(p.results) >= 2 AND mv.uci = p.results->0->>'uci'
-                    AND {_expected(first, 'mv.color')} >= %(winning)s AND {_expected(second, 'mv.color')} <= %(not_winning)s"""
-        order = f"{_expected(first, 'mv.color')} - {_expected(second, 'mv.color')} DESC"
+                    AND {first} >= %(winning)s AND {second} <= %(not_winning)s
+                    AND (%(include_recaptures)s OR NOT mv.is_recapture)"""
+        order = f"{first} - {second} DESC, mv.is_capture, mv.is_check"  # quiet moves first among equals
     else:
         raise ValueError(f"unknown label {label!r}")
     return conn.execute(
         f"""WITH mv AS (
               SELECT m.game_id, m.ply, m.color, m.san, m.uci, b.best_uci AS engine_choice,
-                     {_expected('b.wdl', 'm.color')} AS before,
-                     CASE WHEN a.wdl IS NOT NULL THEN {_expected('a.wdl', 'm.color')}
-                          WHEN a.mate = 0 THEN 1.0   -- the mover delivered mate
-                          ELSE 0.5 END AS after      -- stalemate
+                     m.captured IS NOT NULL AS is_capture, m.is_check,
+                     -- takes back on the square the opponent just captured on: an "only move" nobody misses
+                     (m.captured IS NOT NULL AND prev.captured IS NOT NULL
+                      AND substr(m.uci, 3, 2) = substr(prev.uci, 3, 2)) AS is_recapture,
+                     {_expected(scale, 'm.color', 'b.score_cp', 'b.mate', 'b.wdl')} AS before,
+                     {_expected(scale, 'm.color', 'a.score_cp', 'a.mate', 'a.wdl')} AS after,
+                     abs(coalesce(b.score_cp, 0) - coalesce(a.score_cp, 0)) AS cp_swing
               FROM moves m
               JOIN engine_positions b ON b.config_id = %(config)s AND b.game_id = m.game_id AND b.position = m.ply - 1
               JOIN engine_positions a ON a.config_id = %(config)s AND a.game_id = m.game_id AND a.position = m.ply
+              LEFT JOIN moves prev ON prev.game_id = m.game_id AND prev.ply = m.ply - 1
             )
-            SELECT %(label)s AS type, mv.game_id, mv.ply, mv.color, mv.san, mv.uci, mv.engine_choice,
+            SELECT %(label)s AS type, %(scale)s AS scale, mv.game_id, mv.ply, mv.color, mv.san, mv.uci,
+                   mv.engine_choice, mv.is_capture, mv.is_check, mv.is_recapture,
                    round(mv.before, 3) AS expected_before, round(mv.after, 3) AS expected_after,
                    round(mv.before - mv.after, 3) AS expected_drop {extra_cols},
                    g.played_at, g.white, g.black, g.result, g.source, g.external_id
@@ -490,22 +550,25 @@ def engine_label_rows(conn: psycopg.Connection, label: str, config_id: int, blun
               AND {where}
             ORDER BY {order}
             LIMIT %(limit)s""",
-        {"label": label, "config": config_id, "blunder": blunder, "winning": winning,
-         "not_winning": not_winning, "player": player, "limit": limit},
+        {"label": label, "scale": scale, "config": config_id, "blunder": blunder, "winning": winning,
+         "not_winning": not_winning, "player": player, "limit": limit, "include_recaptures": include_recaptures},
     ).fetchall()
 
 
 def only_winning_move_candidates(conn: psycopg.Connection, config_id: int, winning: float,
                                  player: str | None) -> list[tuple[int, int]]:
-    """(game_id, position) where the mover was clearly winning, played the engine's choice, had more than
-    one legal move, and no two-line search exists yet: the only places ONLY_WINNING_MOVE can apply."""
+    """(game_id, position) where the mover was clearly winning on EITHER scale, played the engine's
+    choice, had more than one legal move, and no two-line search exists yet: the only places
+    ONLY_WINNING_MOVE can apply, whichever scale is used to read it later."""
+    sf = _expected("stockfish", "m.color", "b.score_cp", "b.mate", "b.wdl")
+    li = _expected("lichess", "m.color", "b.score_cp", "b.mate", "b.wdl")
     rows = conn.execute(
         f"""SELECT m.game_id, m.ply - 1 AS position
             FROM moves m
             JOIN games g ON g.id = m.game_id
             JOIN engine_positions b ON b.config_id = %(config)s AND b.game_id = m.game_id AND b.position = m.ply - 1
             WHERE m.uci = b.best_uci AND m.legal_moves_before > 1
-              AND {_expected('b.wdl', 'm.color')} >= %(winning)s
+              AND GREATEST({sf}, {li}) >= %(winning)s
               AND (%(player)s::text IS NULL
                    OR lower(CASE m.color WHEN 'w' THEN g.white ELSE g.black END) = lower(%(player)s))
               AND NOT EXISTS (SELECT 1 FROM engine_move_probes p WHERE p.config_id = %(config)s

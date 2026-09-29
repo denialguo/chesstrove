@@ -197,10 +197,11 @@ class Analyzer:
             return GameFailure(game_id, f"{type(e).__name__}: {e}")
         return GameAnalysis(game_id, positions, probes, time.perf_counter() - t)
 
-    def probe(self, game_id: int, game: CanonicalGame, position: int, kind: str) -> ProbeResult | GameFailure:
+    def probe(self, game_id: int, game: CanonicalGame, position: int, kind: str,
+              moves: tuple[str, ...] | None = None) -> ProbeResult | GameFailure:
         t = time.perf_counter()
         try:
-            probe = run_probe(self.engine, self.settings, game, position, kind)
+            probe = run_probe(self.engine, self.settings, game, position, kind, moves)
         except chess.engine.EngineError as e:
             self.close()
             self.engine = self.factory()
@@ -228,7 +229,7 @@ def _work(task: tuple) -> GameAnalysis | ProbeResult | GameFailure:
 
 
 def _dispatch(analyzer: Analyzer, task: tuple) -> GameAnalysis | ProbeResult | GameFailure:
-    """Tasks are ("game", game_id, game) or ("probe", game_id, game, position, kind)."""
+    """Tasks are ("game", game_id, game) or ("probe", game_id, game, position, kind, moves)."""
     kind, *args = task
     return analyzer(*args) if kind == "game" else analyzer.probe(*args)
 
@@ -369,7 +370,7 @@ def verify_only_winning_moves(
     by_game: dict[int, list[int]] = {}
     for game_id, position in candidates:
         by_game.setdefault(game_id, []).append(position)
-    tasks = (("probe", game_id, game, position, "top_two")
+    tasks = (("probe", game_id, game, position, "top_two", None)
              for game_id, game in _games(conn, list(by_game)) for position in by_game[game_id])
     done = failed = 0
     started = time.perf_counter()
@@ -384,6 +385,45 @@ def verify_only_winning_moves(
             progress({"done": done, "total": len(candidates), "elapsed": elapsed})
     return {"config_id": config["id"], "candidates": len(candidates), "probed": done, "failed": failed,
             "seconds": round(time.perf_counter() - started, 1)}
+
+
+def verify_underpromotions(
+    conn: psycopg.Connection,
+    settings: EngineSettings,
+    stockfish: str | None = None,
+    workers: int = 1,
+    engine_factory: Callable[[], Any] | None = None,
+) -> dict:
+    """Re-ask both underpromotion questions (vs_queen, all_moves) under a stronger config, e.g. 1M nodes
+    per move. Stored under that config's own id, next to (never over) the full-history verdicts, and shown
+    as `deeper_verification`. Cheap because underpromotions are rare. Resumable."""
+    if engine_factory is None:
+        engine_factory = functools.partial(open_stockfish, stockfish_path(stockfish), settings)
+    identify = engine_factory()
+    try:
+        engine_name = identify.id["name"]
+    finally:
+        with contextlib.suppress(Exception):
+            identify.quit()
+    config_id = db.ensure_engine_config(conn, engine_name, settings)
+    have = db.probe_keys(conn, config_id)
+    wanted: dict[int, list[tuple[int, str, tuple[str, ...] | None]]] = {}
+    for game_id, ply, uci in db.underpromotion_moves(conn):
+        for kind, moves in (("vs_queen", (uci, uci[:4] + "q")), ("all_moves", None)):
+            if (game_id, ply - 1, kind) not in have:
+                wanted.setdefault(game_id, []).append((ply - 1, kind, moves))
+    tasks = (("probe", game_id, game, position, kind, moves)
+             for game_id, game in _games(conn, list(wanted)) for position, kind, moves in wanted[game_id])
+    done = failed = 0
+    started = time.perf_counter()
+    for outcome in _parallel(tasks, engine_factory, settings, workers):
+        if isinstance(outcome, GameFailure):
+            failed += 1
+            continue
+        db.insert_engine_probes(conn, config_id, outcome.game_id, [outcome.probe])
+        done += 1
+    return {"config_id": config_id, "engine": engine_name, settings.limit_kind: settings.limit_value,
+            "probes": done, "failed": failed, "seconds": round(time.perf_counter() - started, 1)}
 
 
 def _sha256(path: str) -> str:
