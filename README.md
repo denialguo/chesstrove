@@ -23,6 +23,10 @@ uv run chesstrove events --type MISSED_MATE_IN_ONE --player myname --since 2024-
 uv run chesstrove reanalyze                 # after bumping/adding a detector: redoes only what's stale
 uv run chesstrove serve                     # REST API on 127.0.0.1:8000, interactive docs at /docs
 
+# Engine layer (needs Stockfish: brew install stockfish). Resumable; Ctrl-C keeps finished games.
+uv run chesstrove engine analyze --nodes 25000 --max-games 100   # newest games first
+uv run chesstrove status                    # games, positions, deterministic + Stockfish progress
+
 uv run pytest                              # spins up an embedded Postgres; no setup needed
 uv run scripts/benchmark.py --db
 ```

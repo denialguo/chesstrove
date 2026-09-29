@@ -77,12 +77,13 @@ src/chesstrove/
 scripts/benchmark.py
 tests/                 real Postgres (embedded via pgserver, or $CHESSTROVE_TEST_DATABASE_URL)
 
-planned (Layer 2):
-  engine/config.py     EngineConfig: identity of a reproducible analysis setting
-  engine/worker.py     one Stockfish process per worker; analyzes one whole game per task
-  engine/runner.py     work selection, process pool, single DB writer, progress, cancellation
-  engine/detectors/    engine-backed classifications computed from stored evaluations (no Stockfish)
-scripts/benchmark_engine.py
+  engine.py            Layer 2: EngineSettings (config identity), analyze_game(), run() (resumable,
+                       Ctrl-C safe, newest games first). One module until the Phase 7 worker pool splits it.
+scripts/benchmark_engine.py   Stockfish throughput on a real-game sample, in a throwaway database
+
+planned (Phase 7):
+  engine worker pool   N processes, one Stockfish each, one whole game per task, single DB writer
+  engine detectors     engine-backed classifications computed from stored evaluations (no Stockfish)
 ```
 
 The importer "interface" is a convention rather than an ABC: an importer is any iterable of
@@ -192,37 +193,45 @@ share a config. Identity fields:
 
 | Field | Why it's in the identity |
 |---|---|
-| engine name + version (from the UCI `id name`, e.g. `Stockfish 17.1`) | different versions evaluate differently |
+| engine name + version, exactly as the binary reports it over UCI (`id name`, e.g. `Stockfish 18`) | different versions evaluate differently. Taken from the binary, not the package manager: Homebrew's `stockfish 19` package reports itself as `Stockfish 18` |
 | limit kind + value: `nodes` or `depth` | the main strength knob. **Time limits are not allowed**: they depend on machine load and aren't reproducible |
 | MultiPV | changes which alternatives are recorded, and slightly changes search |
 | Threads (default 1) | multi-threaded search is non-deterministic. Parallelism comes from workers, not threads |
 | Hash (MB) | affects search results under node limits |
-| other UCI options that change search (e.g. `UCI_ShowWDL` doesn't; `Contempt`-style options would) | only options that affect results |
+
+`UCI_ShowWDL` is always on and doesn't affect search. Chess960 mode is set per game automatically by
+python-chess. Options that would change search are simply not exposed, so they can't vary unrecorded.
 
 The engine binary's SHA-256 is recorded on each run as metadata but is not part of the identity. Different
 builds of the same version (e.g. AVX2 vs. generic) search identically.
 
 Determinism: Threads = 1, fixed node or depth limit, `ucinewgame` (hash cleared) at the start of each game,
 positions searched in a fixed order (0 → N). Under those rules, re-running a config on a game reproduces its
-results, and any difference is a bug.
+results, and any difference is a bug. **Verified:** repeated 200k-node searches after `ucinewgame` gave
+identical scores, best moves, node counts and WDL, and a test re-analyzes a game and asserts identical results.
 
 ### Schema
 
-```sql
-engine_configs (id, engine_name, engine_version, limit_kind, limit_value, multipv, threads, hash_mb,
-                options jsonb, UNIQUE (engine_name, engine_version, limit_kind, limit_value, multipv,
-                threads, hash_mb, options))
+Built (Phase 6): `engine_configs`, `engine_runs`, `engine_game_status`, `engine_positions`. Planned (Phase 7):
+`engine_move_probes`, `engine_events`.
 
-engine_runs    (id, config_id, scope,            -- 'all' | 'new' | explicit game ids
-                status, workers, binary_sha256,
-                games_total, games_done, positions_done, cache_hits,
-                cpu_seconds, started_at, finished_at, error)
+```sql
+engine_configs (id, engine_name,                  -- UCI id name, includes the version
+                limit_kind, limit_value, multipv, threads, hash_mb,
+                UNIQUE (engine_name, limit_kind, limit_value, multipv, threads, hash_mb))
+
+engine_runs    (id, config_id, status,            -- running | completed | failed | cancelled
+                workers, binary_path, binary_sha256,
+                games_total, games_done, games_failed, positions_done,
+                engine_seconds,                   -- wall time inside searches
+                errors jsonb, started_at, finished_at)
 
 engine_game_status (config_id, game_id, run_id, positions, completed_at,
                     PRIMARY KEY (config_id, game_id))   -- the unit of completion and resumption
 
 engine_positions (config_id, game_id, position,   -- 0..N, position after `position` plies
-                  score_cp int, mate int,         -- White's point of view; exactly one is non-null
+                  score_cp int, mate int,         -- White's POV; exactly one is non-null;
+                                                  -- mate = 0: side to move is checkmated (not searched)
                   wdl smallint[3],                -- win/draw/loss per mille, White's POV (optional)
                   best_uci text, pv_uci text[],   -- PV capped (e.g. 12 plies) to bound storage
                   multipv jsonb,                  -- [{uci, score_cp, mate}] when MultiPV > 1
@@ -239,9 +248,10 @@ engine_move_probes (config_id, game_id, position, moves text[],  -- restricted s
   `engine_positions` *k−1* and *k* to give each move its evaluation before and after (mover's point of view),
   its evaluation loss, `is_best` and its MultiPV rank. It becomes a materialized view only if queries need it.
 - **Nothing in `moves` or `events` is ever rewritten by engine analysis.** A new config adds rows under
-  a new `config_id`. Old results stay until explicitly pruned (`chesstrove engine prune --config …`).
-- Storage: roughly one `engine_positions` row per ply per config, ~150–250 bytes with a capped PV. A
-  1M-ply history is ~0.2 GB per config. That's fine for Postgres; to be confirmed by benchmark.
+  a new `config_id`. Old results stay until explicitly pruned (a `chesstrove engine prune --config …`
+  command is planned).
+- Storage: one `engine_positions` row per position per config. **Measured: 234 bytes per position** including
+  the index (MultiPV 1, PV capped at 12 plies), so a 1M-position history is ~0.23 GB per config.
 
 ### Engine-backed events
 
@@ -292,8 +302,8 @@ each other.
   opening. Reusing a result is only valid when the position's history can't affect the search: the
   halfmove clock is 0 (the last move was a capture or pawn move), so no earlier position can repeat. Opening
   positions mostly fail this test, so the win is smaller than it looks. This cache is added only if a
-  benchmark shows it's worth the complexity. Correctness comes first, and the cache-hit counter on
-  `engine_runs` exists to measure it.
+  benchmark shows it's worth the complexity. Correctness comes first; if added, `engine_runs` gets a
+  cache-hit counter to measure it.
 
 ### Processing model
 
@@ -319,15 +329,16 @@ runner (parent process)
 - **Single machine only.** No queue service or distributed workers. Worker count defaults to physical cores
   minus one, then gets tuned by benchmark.
 - **Configuration:** Stockfish path from `--stockfish`, `$CHESSTROVE_STOCKFISH`, or `stockfish` on `PATH`.
-  CLI sketch:
+  CLI (built; `--workers` arrives with the Phase 7 pool):
 
   ```text
-  chesstrove engine analyze [--nodes 250000 | --depth 18] [--multipv 3] [--workers N]
-                            [--games all|new] [--stockfish PATH]
-  chesstrove engine status
-  chesstrove engine prune --config ID
+  chesstrove engine analyze [--nodes 100000 | --depth 18] [--multipv 3] [--hash 64]
+                            [--max-games N] [--stockfish PATH]
+  chesstrove engine runs
   chesstrove status          # games, positions, deterministic: complete, stockfish: 43% (per config)
   ```
+
+  API: `GET /status`, `GET /engine-runs`. Starting runs stays in the CLI: they're long local batch jobs.
 
 ### Cost: measure, don't promise
 
@@ -337,11 +348,25 @@ except the position count is machine- and setting-dependent, so no times are pro
 
 ```text
 positions analyzed · positions/sec · games analyzed · wall-clock time · total CPU time
-worker count · limit (nodes/depth) · MultiPV · cache hits
+worker count · limit (nodes/depth) · MultiPV
 ```
 
 It will sweep worker counts to find where throughput stops scaling (memory bandwidth, thermal throttling;
 sustained Layer 1 runs on this laptop already throttle by ~15%).
+
+**Phase 6 measurement (1 worker, Stockfish 18, MultiPV 1, 60 real games / 2,544 positions, Apple Silicon):**
+
+```text
+nodes/position   ms/position   positions/s   wall    time inside search
+        10,000            10         103.3     25 s    24 s
+        25,000            24          41.8     61 s    61 s
+       100,000            99          10.1    253 s   253 s
+```
+
+Cost is linear in nodes (~1 µs per node) and pipeline overhead is negligible: wall time ≈ time inside
+search. For a 250k-position history on one worker, that projects to ~40 min at 10k nodes, ~1.7 h at 25k,
+and ~7 h at 100k. These are projections from this measurement, not promises, and the worker pool (Phase 7)
+divides them by however many workers the benchmark shows actually scale.
 
 ## Reprocessing matrix
 
@@ -361,9 +386,10 @@ sustained Layer 1 runs on this laptop already throttle by ~15%).
 4. **Done: deterministic detector framework**, with per-game version tracking and `reanalyze`.
 5. **Done: rare-event detectors.** The 10 above, including `UNDERPROMOTION` v2's rule-based queen-alternative
    facts. Unsupported variants are counted in `imports.games_skipped`, not `games_failed`.
-6. **Stockfish analysis subsystem.** `engine_configs`/`engine_runs`/`engine_game_status`/`engine_positions`,
-   config identity, a single worker, per-game analysis with move history, resume, cancellation, status,
-   and a benchmark on 1,000 real games.
+6. **Done: Stockfish analysis subsystem.** `engine_configs`/`engine_runs`/`engine_game_status`/
+   `engine_positions`, config identity, a single worker, per-game analysis with move history, rule-scored
+   terminal positions, resume, Ctrl-C cancellation, engine-crash recovery, `chesstrove status`,
+   `GET /status`, and a benchmark (60 real games at three node limits; the 1k/5k/10k runs come with the pool).
 7. **Full-history engine indexing.** Worker pool plus the worker-count benchmark (1k / 5k / 10k games),
    incremental analysis of new imports, `engine_move_probes`, underpromotion questions A and B, and
    engine detectors (missed wins, blunders, only-winning-moves).

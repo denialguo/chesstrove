@@ -9,7 +9,7 @@ from pathlib import Path
 
 import psycopg
 
-from chesstrove import db
+from chesstrove import db, engine
 from chesstrove.analysis import reanalyze
 from chesstrove.detectors import DETECTORS
 from chesstrove.ingest import import_chesscom, import_lichess, import_pgn
@@ -49,6 +49,18 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("reanalyze", help="re-run detectors over stored games (only stale games unless --all)")
     p.add_argument("--detector", action="append", help="repeatable; default: all detectors")
     p.add_argument("--all", action="store_true", help="redo every game, not just stale ones")
+    sub.add_parser("status", help="what's imported and how far each analysis layer has got")
+    p = sub.add_parser("engine", help="Stockfish analysis of every position (Layer 2)")
+    esub = p.add_subparsers(dest="engine_command", required=True)
+    p = esub.add_parser("analyze", help="analyze every game without results for these settings; resumable, Ctrl-C safe")
+    limit = p.add_mutually_exclusive_group()
+    limit.add_argument("--nodes", type=int, help=f"nodes per position (default {engine.EngineSettings().limit_value:,})")
+    limit.add_argument("--depth", type=int, help="fixed depth per position instead of nodes")
+    p.add_argument("--multipv", type=int, default=1, help="lines per position (costs roughly proportionally)")
+    p.add_argument("--hash", type=int, default=engine.EngineSettings().hash_mb, help="hash MB")
+    p.add_argument("--max-games", type=int, help="stop after this many games (e.g. to sample or benchmark)")
+    p.add_argument("--stockfish", help="path to the binary (default: $CHESSTROVE_STOCKFISH, then PATH)")
+    esub.add_parser("runs", help="list engine runs")
     args = parser.parse_args(argv)
 
     try:
@@ -93,11 +105,55 @@ def main(argv: list[str] | None = None) -> int:
                 uvicorn.run("chesstrove.api:app", host="127.0.0.1", port=args.port)  # no auth: localhost only
             case "reanalyze":
                 _print(db.get_analysis_run(conn, reanalyze(conn, args.detector, force=args.all)))
+            case "status":
+                _print_status(db.status_summary(conn, {d.id: d.version for d in DETECTORS}))
+            case "engine":
+                if args.engine_command == "runs":
+                    _print(db.list_engine_runs(conn))
+                    return 0
+                settings = engine.EngineSettings(
+                    limit_kind="depth" if args.depth else "nodes",
+                    limit_value=args.depth or args.nodes or engine.EngineSettings().limit_value,
+                    multipv=args.multipv, hash_mb=args.hash,
+                )
+                try:
+                    run_id = engine.run(conn, settings, args.stockfish, args.max_games, _engine_progress)
+                except FileNotFoundError as e:
+                    print(e, file=sys.stderr)
+                    return 1
+                except KeyboardInterrupt:
+                    print("\ncancelled; finished games are saved, run the same command to resume", file=sys.stderr)
+                    return 130
+                print(file=sys.stderr)
+                _print([r for r in db.list_engine_runs(conn, 1) if r["id"] == run_id][0])
     return 0
 
 
 def _print(obj: object) -> None:
     print(json.dumps(obj, indent=2, default=str))
+
+
+def _print_status(s: dict) -> None:
+    games = s["games"] or 1
+    print(f"{s['games']:,} games imported · {s['positions']:,} positions indexed")
+    done = s["deterministic_done"]
+    print(f"Deterministic analysis: {'complete' if done == s['games'] else f'{done / games:.0%} (run `chesstrove reanalyze`)'}")
+    if not s["engine"]:
+        print("Stockfish analysis: not started (`chesstrove engine analyze`)")
+    for e in s["engine"]:
+        label = f"{e['engine_name']}, {e['limit_kind']}={e['limit_value']:,}"
+        if e["multipv"] > 1:
+            label += f", multipv={e['multipv']}"
+        share = e["positions_done"] / (s["positions"] or 1)
+        print(f"Stockfish analysis [{label}]: {share:.0%} ({e['games_done']:,}/{s['games']:,} games)")
+
+
+def _engine_progress(p: dict) -> None:
+    left = p["games_total"] - p["games_done"]
+    per_game = p["elapsed"] / p["games_done"]
+    print(f"\r{p['games_done']:,}/{p['games_total']:,} games · {p['positions']:,} positions · "
+          f"{p['positions_per_sec']:.1f} positions/s · ~{left * per_game / 60:.0f} min left at this pace   ",
+          end="", file=sys.stderr, flush=True)
 
 
 if __name__ == "__main__":

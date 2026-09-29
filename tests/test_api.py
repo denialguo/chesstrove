@@ -99,3 +99,16 @@ def test_lichess_import(client, monkeypatch):
     import_id = client.post("/imports/lichess", json={"username": "Alice"}).json()["import_id"]
     imp = client.get(f"/imports/{import_id}").json()
     assert (imp["status"], imp["source"], imp["games_imported"], imp["resume_state"]) == ("completed", "lichess", 2, {"since": 2001})
+
+
+def test_status_and_engine_runs(client):
+    from test_engine import FakeEngine, TINY
+    from chesstrove import engine
+
+    client.post("/imports/pgn", content=PGN)
+    with api.db.connect() as c:
+        engine.run(c, TINY, engine_factory=FakeEngine)
+    s = client.get("/status").json()
+    assert (s["games"], s["deterministic_done"], s["engine"][0]["games_done"]) == (2, 2, 2)
+    [run] = client.get("/engine-runs").json()
+    assert (run["status"], run["engine_name"]) == ("completed", "FakeFish 1")

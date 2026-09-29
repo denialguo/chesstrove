@@ -147,6 +147,20 @@ def get_analysis_run(run_id: int, c: Conn) -> dict:
     return _found(db.get_analysis_run(c, run_id), "analysis run")
 
 
+# --- status & engine (Layer 2) ---------------------------------------------------------------------
+
+@app.get("/status")
+def status(c: Conn) -> dict:
+    """Games and positions indexed, deterministic coverage, and progress per engine config."""
+    return db.status_summary(c, {d.id: d.version for d in detectors.DETECTORS})
+
+
+@app.get("/engine-runs")
+def list_engine_runs(c: Conn, limit: Limit = 50) -> list[dict]:
+    """Engine runs are started from the CLI (`chesstrove engine analyze`): they're long local batch jobs."""
+    return db.list_engine_runs(c, limit)
+
+
 def _in_new_connection(job, *args, **kwargs) -> None:
     """Background jobs outlive the request, so they get their own connection. A failure is recorded on
     the job's row (status=failed, plus the reason) by the job itself, so here it's only logged."""

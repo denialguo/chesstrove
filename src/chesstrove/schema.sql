@@ -119,3 +119,66 @@ CREATE TABLE IF NOT EXISTS game_analysis (
     analyzed_at        timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS events_detector ON events (detector_id, detector_version);
+
+-- ================================================================================================
+-- Layer 2: engine-analysis index. Reads games/moves, never writes them. See ARCHITECTURE.md.
+-- ================================================================================================
+
+-- The identity of a reproducible analysis setting. Results are only comparable within one config.
+CREATE TABLE IF NOT EXISTS engine_configs (
+    id              bigserial PRIMARY KEY,
+    engine_name     text NOT NULL,            -- as the binary reports it over UCI, e.g. 'Stockfish 18'
+    limit_kind      text NOT NULL CHECK (limit_kind IN ('nodes', 'depth')),  -- never time: not reproducible
+    limit_value     int NOT NULL CHECK (limit_value > 0),
+    multipv         int NOT NULL DEFAULT 1 CHECK (multipv >= 1),
+    threads         int NOT NULL DEFAULT 1 CHECK (threads >= 1),
+    hash_mb         int NOT NULL,
+    UNIQUE (engine_name, limit_kind, limit_value, multipv, threads, hash_mb)
+);
+
+CREATE TABLE IF NOT EXISTS engine_runs (
+    id               bigserial PRIMARY KEY,
+    config_id        bigint NOT NULL REFERENCES engine_configs ON DELETE CASCADE,
+    status           text NOT NULL DEFAULT 'running'
+                     CHECK (status IN ('running', 'completed', 'failed', 'cancelled')),
+    workers          int NOT NULL DEFAULT 1,
+    binary_path      text,
+    binary_sha256    text,                    -- metadata only; not part of the config identity
+    games_total      int NOT NULL DEFAULT 0,  -- pending when the run started
+    games_done       int NOT NULL DEFAULT 0,
+    games_failed     int NOT NULL DEFAULT 0,
+    positions_done   int NOT NULL DEFAULT 0,
+    engine_seconds   double precision NOT NULL DEFAULT 0,  -- wall time spent inside searches
+    errors           jsonb NOT NULL DEFAULT '[]',
+    started_at       timestamptz NOT NULL DEFAULT now(),
+    finished_at      timestamptz
+);
+
+-- One row per (config, game) once every position of the game is stored: the unit of completion/resume.
+CREATE TABLE IF NOT EXISTS engine_game_status (
+    config_id     bigint NOT NULL REFERENCES engine_configs ON DELETE CASCADE,
+    game_id       bigint NOT NULL REFERENCES games ON DELETE CASCADE,
+    run_id        bigint REFERENCES engine_runs ON DELETE SET NULL,
+    positions     int NOT NULL,
+    completed_at  timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (config_id, game_id)
+);
+
+-- Position k = the position after k plies (0 = start). Scores are from White's point of view.
+-- Exactly one of score_cp / mate is set. mate = 0 means the side to move is checkmated (no search run).
+CREATE TABLE IF NOT EXISTS engine_positions (
+    config_id   bigint NOT NULL REFERENCES engine_configs ON DELETE CASCADE,
+    game_id     bigint NOT NULL REFERENCES games ON DELETE CASCADE,
+    position    int NOT NULL,
+    score_cp    int,
+    mate        int,
+    wdl         smallint[],                   -- {win, draw, loss} per mille, White's POV
+    best_uci    text,                         -- NULL in terminal positions
+    pv_uci      text[],                       -- capped
+    multipv     jsonb,                        -- [{uci, score_cp, mate}] when multipv > 1
+    depth       int,
+    seldepth    int,
+    nodes       bigint,
+    PRIMARY KEY (config_id, game_id, position),
+    CHECK ((score_cp IS NULL) <> (mate IS NULL))
+);

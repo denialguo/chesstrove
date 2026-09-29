@@ -286,3 +286,109 @@ def list_events(
         {"type": type, "color": color, "player": player, "since": since, "until": until,
          "game_id": game_id, "limit": limit, "offset": offset},
     ).fetchall()
+
+
+# --- engine analysis (Layer 2) --------------------------------------------------------------------
+
+ENGINE_POSITION_COLUMNS = (
+    "config_id, game_id, position, score_cp, mate, wdl, best_uci, pv_uci, multipv, depth, seldepth, nodes"
+)
+_PENDING = """FROM games g
+              WHERE NOT EXISTS (SELECT 1 FROM engine_game_status s WHERE s.config_id = %(config)s AND s.game_id = g.id)"""
+
+
+def ensure_engine_config(conn: psycopg.Connection, engine_name: str, s: Any) -> int:
+    """Get-or-create the config row for (engine as it reports itself, settings)."""
+    return conn.execute(
+        """INSERT INTO engine_configs (engine_name, limit_kind, limit_value, multipv, threads, hash_mb)
+           VALUES (%s, %s, %s, %s, %s, %s)
+           ON CONFLICT (engine_name, limit_kind, limit_value, multipv, threads, hash_mb)
+             DO UPDATE SET engine_name = EXCLUDED.engine_name
+           RETURNING id""",
+        (engine_name, s.limit_kind, s.limit_value, s.multipv, s.threads, s.hash_mb),
+    ).fetchone()["id"]
+
+
+def count_pending_engine_games(conn: psycopg.Connection, config_id: int) -> int:
+    return conn.execute(f"SELECT count(*) AS n {_PENDING}", {"config": config_id}).fetchone()["n"]
+
+
+def pending_engine_games(conn: psycopg.Connection, config_id: int, skip: list[int], limit: int) -> list[dict]:
+    """Newest games first, so recent games get engine insights first. Finished games drop out of the
+    pending set on their own, so no cursor is needed; `skip` excludes games that failed this run."""
+    return conn.execute(
+        f"""SELECT g.*, ARRAY(SELECT m.uci FROM moves m WHERE m.game_id = g.id ORDER BY m.ply) AS moves_uci
+            {_PENDING} AND NOT (g.id = ANY(%(skip)s))
+            ORDER BY g.played_at DESC NULLS LAST, g.id DESC
+            LIMIT %(limit)s""",
+        {"config": config_id, "skip": skip, "limit": limit},
+    ).fetchall()
+
+
+def start_engine_run(conn: psycopg.Connection, config_id: int, games_total: int,
+                     binary_path: str | None, binary_sha256: str | None) -> int:
+    return conn.execute(
+        """INSERT INTO engine_runs (config_id, games_total, binary_path, binary_sha256)
+           VALUES (%s, %s, %s, %s) RETURNING id""",
+        (config_id, games_total, binary_path, binary_sha256),
+    ).fetchone()["id"]
+
+
+def insert_engine_positions(conn: psycopg.Connection, config_id: int, game_id: int, results: list[Any]) -> None:
+    with conn.cursor().copy(f"COPY engine_positions ({ENGINE_POSITION_COLUMNS}) FROM STDIN") as copy:
+        for r in results:
+            copy.write_row((config_id, game_id, r.position, r.score_cp, r.mate, list(r.wdl) if r.wdl else None,
+                            r.best_uci, r.pv_uci, Jsonb(r.multipv) if r.multipv else None, r.depth, r.seldepth, r.nodes))
+
+
+def mark_engine_game_done(conn: psycopg.Connection, config_id: int, game_id: int, run_id: int, positions: int) -> None:
+    conn.execute(
+        "INSERT INTO engine_game_status (config_id, game_id, run_id, positions) VALUES (%s, %s, %s, %s)",
+        (config_id, game_id, run_id, positions),
+    )
+
+
+def record_engine_progress(conn: psycopg.Connection, run_id: int, games: int, positions: int, seconds: float) -> None:
+    conn.execute(
+        """UPDATE engine_runs SET games_done = games_done + %s, positions_done = positions_done + %s,
+                                  engine_seconds = engine_seconds + %s WHERE id = %s""",
+        (games, positions, seconds, run_id),
+    )
+
+
+def record_engine_error(conn: psycopg.Connection, run_id: int, error: dict) -> None:
+    conn.execute(
+        """UPDATE engine_runs SET games_failed = games_failed + 1,
+             errors = CASE WHEN jsonb_array_length(errors) < %s THEN errors || %s ELSE errors END
+           WHERE id = %s""",
+        (MAX_STORED_ERRORS, Jsonb([error]), run_id),
+    )
+
+
+def finish_engine_run(conn: psycopg.Connection, run_id: int, status: str) -> None:
+    conn.execute("UPDATE engine_runs SET status = %s, finished_at = now() WHERE id = %s", (status, run_id))
+
+
+def list_engine_runs(conn: psycopg.Connection, limit: int = 50) -> list[dict]:
+    return conn.execute(
+        """SELECT r.*, c.engine_name, c.limit_kind, c.limit_value, c.multipv
+           FROM engine_runs r JOIN engine_configs c ON c.id = r.config_id ORDER BY r.id DESC LIMIT %s""",
+        (limit,),
+    ).fetchall()
+
+
+def status_summary(conn: psycopg.Connection, detector_versions: dict[str, int]) -> dict:
+    """Both layers at a glance: how much is imported, and how far each analysis has got."""
+    totals = conn.execute(
+        """SELECT count(*) AS games, coalesce(sum(ply_count + 1), 0) AS positions,
+                  count(*) FILTER (WHERE a.detector_versions @> %s) AS deterministic_done
+           FROM games g LEFT JOIN game_analysis a ON a.game_id = g.id""",
+        (Jsonb(detector_versions),),
+    ).fetchone()
+    engines = conn.execute(
+        """SELECT c.id AS config_id, c.engine_name, c.limit_kind, c.limit_value, c.multipv,
+                  count(s.game_id) AS games_done, coalesce(sum(s.positions), 0) AS positions_done
+           FROM engine_configs c LEFT JOIN engine_game_status s ON s.config_id = c.id
+           GROUP BY c.id ORDER BY c.id""",
+    ).fetchall()
+    return {**totals, "engine": engines}

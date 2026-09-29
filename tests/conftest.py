@@ -5,7 +5,7 @@ import pytest
 
 from chesstrove import db
 
-TABLES = "game_analysis, events, analysis_runs, moves, games, imports, chess_accounts, users"
+TABLES = "engine_positions, engine_game_status, engine_runs, engine_configs, game_analysis, events, analysis_runs, moves, games, imports, chess_accounts, users"
 
 
 @pytest.fixture(scope="session")
