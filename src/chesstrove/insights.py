@@ -45,14 +45,6 @@ def _analysis(config: dict, row: dict | None) -> dict | None:
     before = _pov(row["before_cp"], row["before_mate"], flip)
     after = _pov(row["after_cp"], row["after_mate"], flip) if row["after_cp"] is not None or row["after_mate"] is not None else None
     lines = row["multipv"] or []
-    line_scores = {l["uci"]: _pov(l["score_cp"], l["mate"], flip) for l in lines}
-
-    is_best = played == row["best_uci"] or (played in line_scores and line_scores[played] == max(line_scores.values()))
-    rank = next((i + 1 for i, l in enumerate(lines) if l["uci"] == played), 1 if played == row["best_uci"] else None)
-    uniquely_best = None  # only knowable when MultiPV shows the runner-up
-    if len(line_scores) >= 2:
-        ranked = sorted(line_scores.values(), reverse=True)
-        uniquely_best = played in line_scores and line_scores[played] == ranked[0] > ranked[1]
 
     out: dict[str, Any] = {
         "config": {"id": config["id"], "engine": config["engine_name"],
@@ -60,17 +52,39 @@ def _analysis(config: dict, row: dict | None) -> dict | None:
         "eval_before": _show(before),
         "eval_after": _show(after),
         "eval_loss_cp": before.score() - after.score() if after and not before.is_mate() and not after.is_mate() else None,
-        "best_move": row["best_uci"],
-        "is_best_move": is_best,
-        "uniquely_best": uniquely_best,
-        "played_move_rank": rank,
+        "engine_choice": row["best_uci"],
+        # The unrestricted search's first choice. NOT a claim that the move is the best move: that needs
+        # every legal move scored (the all_moves probe, below).
+        "matches_engine_choice": played == row["best_uci"],
+        "rank_in_engine_lines": next((i + 1 for i, l in enumerate(lines) if l["uci"] == played), None),
     }
-    if row["probe"]:  # one search scoring the played move, queening, and the engine's pick: a fair comparison
-        scores = {r["uci"]: _pov(r["score_cp"], r["mate"], flip) for r in row["probe"]}
+    if row["vs_queen"]:  # B. underpromotion vs. queening on the same square, scored in one search
+        scores = {r["uci"]: _pov(r["score_cp"], r["mate"], flip) for r in row["vs_queen"]}
         queen = played[:4] + "q"
-        out["is_best_move"] = scores[played] >= max(scores.values())
-        out["evaluation"] = _show(scores[played])
-        if queen in scores:
-            out["queen_promotion_evaluation"] = _show(scores[queen])
+        if played in scores and queen in scores:
+            out["vs_queen"] = {"evaluation": _show(scores[played]), "queen_promotion_evaluation": _show(scores[queen]),
+                               "budget": row["vs_queen_budget"]}
             out["better_than_queen"] = scores[played] > scores[queen]
+    if row["all_moves"] is not None:  # A. the played move vs. every legal move, scored in one search
+        out.update(_best_move_verdict(row, played, flip))
     return out
+
+
+def _best_move_verdict(row: dict, played: str, flip: bool) -> dict:
+    """is_best_move / tied_for_best_move / unique_best_move, only when every legal move got a score."""
+    scores = {r["uci"]: _pov(r["score_cp"], r["mate"], flip) for r in row["all_moves"]}
+    complete = set(scores) == set(row["all_moves_list"]) and played in scores
+    verdict: dict[str, Any] = {"all_moves": {"legal_moves": len(row["all_moves_list"]), "scored": len(scores),
+                                             "budget": row["all_moves_budget"]}}
+    if not complete:  # never guess: an unscored legal move might be better
+        return {**verdict, "is_best_move": None, "tied_for_best_move": None, "unique_best_move": None,
+                "played_move_rank": None}
+    top = max(scores.values())
+    best = sorted(u for u, sc in scores.items() if sc == top)
+    is_best = scores[played] == top
+    verdict["all_moves"].update(evaluation=_show(scores[played]), best_moves=best, best_evaluation=_show(top))
+    return {**verdict,
+            "is_best_move": is_best,
+            "tied_for_best_move": is_best and len(best) > 1,
+            "unique_best_move": is_best and len(best) == 1,
+            "played_move_rank": 1 + sum(1 for sc in scores.values() if sc > scores[played])}

@@ -17,25 +17,32 @@ TINY = EngineSettings(limit_value=2_000)
 needs_stockfish = pytest.mark.skipif(shutil.which("stockfish") is None, reason="Stockfish not installed")
 
 
+ROOT_SCORES: dict[str, int] = {}  # uci -> White-POV centipawns for restricted searches; tests set it
+
+
 class FakeEngine:
-    """Records what it was asked. Answers +0.10 for its first legal move; in restricted searches, scores
-    root moves in the order given (+0.30, +0.20, ...), so tests control the ranking."""
+    """Records what it was asked. Answers +0.10 for its first legal move. In restricted searches every
+    root move gets a line, scored from ROOT_SCORES (default 0), so tests control rankings and ties."""
 
     id = {"name": "FakeFish 1"}
 
-    def __init__(self, fail_on_plies: int | None = None):
+    def __init__(self, fail_on_plies: int | None = None, drop_probe_lines: int = 0):
         self.calls: list[tuple[int, str, object]] = []
-        self.probes: list[tuple[int, list[str]]] = []
+        self.probes: list[tuple[int, list[str], object]] = []
         self.fail_on_plies = fail_on_plies
+        self.drop_probe_lines = drop_probe_lines  # simulate a search that didn't score every root move
         self.quit_called = False
 
     def analyse(self, board, limit, multipv, game, info, root_moves=None):
         if self.fail_on_plies is not None and len(board.move_stack) == self.fail_on_plies:
             raise chess.engine.EngineTerminatedError("engine died")
         if root_moves:
-            self.probes.append((len(board.move_stack), [m.uci() for m in root_moves]))
-            return [{"score": chess.engine.PovScore(chess.engine.Cp(30 - 10 * i), chess.WHITE), "pv": [m]}
-                    for i, m in enumerate(root_moves)]
+            assert multipv == len(root_moves)  # every root move must get its own line
+            self.probes.append((len(board.move_stack), [m.uci() for m in root_moves], limit))
+            lines = sorted(root_moves, key=lambda m: -ROOT_SCORES.get(m.uci(), 0))
+            lines = lines[: len(lines) - self.drop_probe_lines]
+            return [{"score": chess.engine.PovScore(chess.engine.Cp(ROOT_SCORES.get(m.uci(), 0)), chess.WHITE), "pv": [m]}
+                    for m in lines]
         self.calls.append((len(board.move_stack), board.root().fen(), game))
         move = next(iter(board.legal_moves))
         return [{"score": chess.engine.PovScore(chess.engine.Cp(10), chess.WHITE), "pv": [move],
@@ -233,23 +240,73 @@ WHITE_UNDER = '[White "alice"]\n[Black "bob"]\n[Result "*"]\n[SetUp "1"]\n[FEN "
 BLACK_UNDER = '[White "bob"]\n[Black "alice"]\n[Result "*"]\n[SetUp "1"]\n[FEN "4k3/8/8/8/8/8/p7/7K b - - 0 1"]\n\n1... a1=B *\n'
 
 
-def test_probe_scores_underpromotion_queen_and_best_in_one_search(conn):
+def underpromotion_analysis(conn, monkeypatch, scores, pgn=WHITE_UNDER + "\n" + BLACK_UNDER, **fake):
     from chesstrove import insights
 
-    import_pgn(conn, WHITE_UNDER + "\n" + BLACK_UNDER, "g.pgn")
-    engine.run(conn, TINY, engine_factory=FakeEngine)
-    probes = conn.execute("SELECT position, moves FROM engine_move_probes ORDER BY game_id").fetchall()
-    assert [p["moves"][:2] for p in probes] == [["a7a8n", "a7a8q"], ["a2a1b", "a2a1q"]]  # played first, then queen
+    monkeypatch.setattr(__import__(__name__), "ROOT_SCORES", scores)
+    import_pgn(conn, pgn, "g.pgn")
+    engine.run(conn, TINY, engine_factory=lambda: FakeEngine(**fake))
+    return {e["color"]: e["engine_analysis"] for e in insights.annotate(conn, db.list_events(conn, type="UNDERPROMOTION"))}
 
-    events = insights.annotate(conn, db.list_events(conn, type="UNDERPROMOTION"))
-    by_color = {e["color"]: e["engine_analysis"] for e in events}
-    # The fake scores root moves +30, +20, ... from White's POV, in the order given (played, queen, best).
-    white, black = by_color["w"], by_color["b"]
-    assert (white["is_best_move"], white["better_than_queen"], white["evaluation"], white["queen_promotion_evaluation"]) == (
-        True, True, {"cp": 30}, {"cp": 20})
-    # For Black the same numbers flip: the played move is now the worst of the three.
-    assert (black["is_best_move"], black["better_than_queen"], black["evaluation"]) == (False, False, {"cp": -30})
-    assert white["config"]["engine"] == "FakeFish 1" and white["best_move"] is not None
+
+def test_probes_cover_the_queen_question_and_every_legal_move(conn, monkeypatch):
+    fake = FakeEngine()
+    monkeypatch.setattr(__import__(__name__), "ROOT_SCORES", {})
+    import_pgn(conn, WHITE_UNDER, "g.pgn")
+    engine.run(conn, TINY, engine_factory=lambda: fake)
+    probes = conn.execute("SELECT kind, moves, budget FROM engine_move_probes ORDER BY kind").fetchall()
+    legal = {m.uci() for m in chess.Board("8/P1k5/8/8/8/8/8/4K3 w - - 0 1").legal_moves}
+    assert [p["kind"] for p in probes] == ["all_moves", "vs_queen"]
+    assert set(probes[0]["moves"]) == legal and len(legal) == 9  # 4 promotions + 5 king moves
+    assert probes[1]["moves"] == ["a7a8n", "a7a8q"]
+    # budget scales with the number of root moves: each gets about the normal per-position effort
+    assert (probes[0]["budget"], probes[1]["budget"]) == ({"nodes": 9 * 2_000}, {"nodes": 2 * 2_000})
+    assert [p[2].nodes for p in fake.probes] == [2 * 2_000, 9 * 2_000]
+
+
+def test_unique_best_and_better_than_queen(conn, monkeypatch):
+    a = underpromotion_analysis(conn, monkeypatch, {"a7a8n": 50, "a7a8q": 20})["w"]
+    assert (a["is_best_move"], a["unique_best_move"], a["tied_for_best_move"], a["played_move_rank"]) == (True, True, False, 1)
+    assert (a["better_than_queen"], a["vs_queen"]["evaluation"], a["vs_queen"]["queen_promotion_evaluation"]) == (
+        True, {"cp": 50}, {"cp": 20})
+    assert a["all_moves"]["best_moves"] == ["a7a8n"] and a["all_moves"]["scored"] == a["all_moves"]["legal_moves"] == 9
+
+
+def test_a_better_move_outside_the_queen_comparison_means_not_best(conn, monkeypatch):
+    # Beats queening, but a quiet king move (never in the vs_queen search) scores higher: not the best move.
+    a = underpromotion_analysis(conn, monkeypatch, {"a7a8n": 50, "a7a8q": 20, "e1d2": 90})["w"]
+    assert (a["better_than_queen"], a["is_best_move"], a["unique_best_move"], a["played_move_rank"]) == (True, False, False, 2)
+    assert a["all_moves"]["best_moves"] == ["e1d2"]
+
+
+def test_tied_for_best(conn, monkeypatch):
+    a = underpromotion_analysis(conn, monkeypatch, {"a7a8n": 50, "a7a8q": 50})["w"]
+    assert (a["is_best_move"], a["tied_for_best_move"], a["unique_best_move"], a["better_than_queen"]) == (
+        True, True, False, False)  # equal to queening is not *better* than queening
+
+
+def test_black_scores_are_flipped(conn, monkeypatch):
+    # White-POV +50 for Black's bishop promotion is the worst outcome for Black.
+    b = underpromotion_analysis(conn, monkeypatch, {"a2a1b": 50, "a2a1q": -20})["b"]
+    assert (b["is_best_move"], b["better_than_queen"], b["vs_queen"]["evaluation"]) == (False, False, {"cp": -50})
+
+
+def test_incomplete_all_moves_search_claims_nothing(conn, monkeypatch):
+    a = underpromotion_analysis(conn, monkeypatch, {"a7a8n": 50}, drop_probe_lines=1)["w"]
+    assert (a["is_best_move"], a["tied_for_best_move"], a["unique_best_move"]) == (None, None, None)
+    assert a["all_moves"]["scored"] < a["all_moves"]["legal_moves"]
+
+
+def test_ordinary_moves_never_claim_best(conn):
+    from chesstrove import insights
+
+    import_pgn(conn, SCHOLARS, "g.pgn")
+    engine.run(conn, TINY, engine_factory=FakeEngine)
+    game_id = conn.execute("SELECT id FROM games").fetchone()["id"]
+    [e] = insights.annotate(conn, [{"game_id": game_id, "ply": 7, "type": "ANY"}])  # 4. Qxf7#
+    a = e["engine_analysis"]
+    assert "is_best_move" not in a and "unique_best_move" not in a  # only the all-moves probe may claim these
+    assert (a["engine_choice"], a["matches_engine_choice"], a["eval_after"]) == ("h5h7", False, {"mate": 0})
 
 
 def test_unanalyzed_events_say_so(conn):
@@ -268,5 +325,20 @@ def test_stockfish_knight_fork_underpromotion_beats_queening(conn):
     engine.run(conn, EngineSettings(limit_value=20_000))
     [e] = insights.annotate(conn, db.list_events(conn, type="UNDERPROMOTION"))
     a = e["engine_analysis"]
-    assert a["is_best_move"] and a["better_than_queen"] and a["evaluation"]["cp"] > 200
-    assert abs(a["queen_promotion_evaluation"]["cp"]) < 100  # queening lets Black hold
+    assert (a["is_best_move"], a["unique_best_move"], a["better_than_queen"]) == (True, True, True)
+    assert a["vs_queen"]["evaluation"]["cp"] > 200
+    assert abs(a["vs_queen"]["queen_promotion_evaluation"]["cp"]) < 100  # queening lets Black hold
+
+
+@needs_stockfish
+def test_stockfish_saavedra_rook_underpromotion_is_the_unique_best_move(conn):
+    # A cheap unrestricted search prefers Kd3 here; scoring every legal move finds g8=R mates in 2.
+    from chesstrove import insights
+
+    saavedra = '[White "a"]\n[Black "b"]\n[Result "*"]\n[SetUp "1"]\n[FEN "8/6P1/8/8/8/8/2K5/k7 w - - 0 1"]\n\n1. g8=R *\n'
+    import_pgn(conn, saavedra, "g.pgn")
+    engine.run(conn, EngineSettings(limit_value=20_000))
+    [e] = insights.annotate(conn, db.list_events(conn, type="UNDERPROMOTION"))
+    a = e["engine_analysis"]
+    assert (a["is_best_move"], a["unique_best_move"], a["better_than_queen"]) == (True, True, True)
+    assert a["all_moves"]["evaluation"] == {"mate": 2} and a["vs_queen"]["queen_promotion_evaluation"] == {"cp": 0}

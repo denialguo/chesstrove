@@ -339,8 +339,9 @@ def start_engine_run(conn: psycopg.Connection, config_id: int, games_total: int,
 def insert_engine_probes(conn: psycopg.Connection, config_id: int, game_id: int, probes: list[Any]) -> None:
     for p in probes:
         conn.execute(
-            "INSERT INTO engine_move_probes (config_id, game_id, position, moves, results) VALUES (%s, %s, %s, %s, %s)",
-            (config_id, game_id, p.position, list(p.moves), Jsonb(list(p.results))),
+            """INSERT INTO engine_move_probes (config_id, game_id, position, kind, moves, results, budget)
+               VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+            (config_id, game_id, p.position, p.kind, list(p.moves), Jsonb(list(p.results)), Jsonb(p.budget)),
         )
 
 
@@ -424,14 +425,17 @@ def engine_facts_for_moves(conn: psycopg.Connection, config_id: int, moves: list
     rows = conn.execute(
         """SELECT k.game_id, k.ply, m.uci, m.color,
                   b.score_cp AS before_cp, b.mate AS before_mate, b.best_uci, b.multipv,
-                  a.score_cp AS after_cp, a.mate AS after_mate, p.results AS probe
+                  a.score_cp AS after_cp, a.mate AS after_mate,
+                  q.results AS vs_queen, q.budget AS vs_queen_budget,
+                  x.results AS all_moves, x.moves AS all_moves_list, x.budget AS all_moves_budget
            FROM unnest(%(games)s::bigint[], %(plies)s::int[]) AS k(game_id, ply)
            JOIN moves m ON m.game_id = k.game_id AND m.ply = k.ply
            JOIN engine_positions b ON b.config_id = %(config)s AND b.game_id = k.game_id AND b.position = k.ply - 1
            LEFT JOIN engine_positions a ON a.config_id = %(config)s AND a.game_id = k.game_id AND a.position = k.ply
-           LEFT JOIN LATERAL (SELECT results FROM engine_move_probes p
-                              WHERE p.config_id = %(config)s AND p.game_id = k.game_id AND p.position = k.ply - 1
-                                AND m.uci = ANY(p.moves) LIMIT 1) p ON true""",
+           LEFT JOIN engine_move_probes q ON q.config_id = %(config)s AND q.game_id = k.game_id
+                AND q.position = k.ply - 1 AND q.kind = 'vs_queen' AND m.uci = ANY(q.moves)
+           LEFT JOIN engine_move_probes x ON x.config_id = %(config)s AND x.game_id = k.game_id
+                AND x.position = k.ply - 1 AND x.kind = 'all_moves'""",
         {"games": [g for g, _ in moves], "plies": [p for _, p in moves], "config": config_id},
     ).fetchall()
     return {(r["game_id"], r["ply"]): r for r in rows}

@@ -62,11 +62,17 @@ class PositionResult:
 
 @dataclass(frozen=True, slots=True)
 class Probe:
-    """A restricted search (UCI `searchmoves`) from `position`, scoring only `moves`, all in one search."""
+    """One search from `position` that scores every move in `moves` (UCI searchmoves + MultiPV = all of
+    them), so their scores are directly comparable. Kinds:
+      vs_queen   {played underpromotion, queening on the same square}
+      all_moves  every legal move: the only basis for claiming a move is the best one
+    """
 
     position: int
+    kind: Literal["vs_queen", "all_moves"]
     moves: tuple[str, ...]
-    results: tuple[dict, ...]  # ranked [{uci, score_cp, mate}], White's POV
+    results: tuple[dict, ...]  # ranked [{uci, score_cp, mate}], White's POV; one per move when complete
+    budget: dict  # {"nodes": total} or {"depth": d}, as actually searched
 
 
 @dataclass(frozen=True, slots=True)
@@ -127,27 +133,35 @@ def _analyze_position(engine: Any, settings: EngineSettings, board: chess.Board,
     )
 
 
-def probe_requests(game: CanonicalGame, positions: Sequence[PositionResult]) -> list[tuple[int, tuple[str, ...]]]:
-    """Restricted searches this game needs: each underpromotion vs. queening on the same square, plus the
-    engine's own best move, so all of them are scored by one search and compare fairly."""
+def probe_requests(game: CanonicalGame) -> list[tuple[int, str, tuple[str, ...] | None]]:
+    """Probes this game needs, as (position, kind, moves; None = every legal move). Each underpromotion
+    gets both questions, kept separate: was it better than queening, and was it the best move at all."""
     requests = []
     for ply, uci in enumerate(game.moves_uci, start=1):
         if len(uci) == 5 and uci[4] in "nbr":
-            best = positions[ply - 1].best_uci
-            requests.append((ply - 1, tuple(dict.fromkeys([uci, uci[:4] + "q", *([best] if best else [])]))))
+            requests.append((ply - 1, "vs_queen", (uci, uci[:4] + "q")))
+            requests.append((ply - 1, "all_moves", None))
     return requests
 
 
-def run_probe(engine: Any, settings: EngineSettings, game: CanonicalGame, position: int, moves: tuple[str, ...]) -> Probe:
+def run_probe(engine: Any, settings: EngineSettings, game: CanonicalGame, position: int,
+              kind: Literal["vs_queen", "all_moves"], moves: tuple[str, ...] | None) -> Probe:
+    """Deliberately expensive and only used for rare moves. With a node limit, the budget is the config's
+    per-position nodes x the number of moves, so each move gets about the normal per-position effort;
+    with a depth limit, every line is searched to that depth."""
     board = start_board(game)
     for uci in game.moves_uci[:position]:
         board.push_uci(uci)
+    root = [board.parse_uci(m) for m in moves] if moves else list(board.legal_moves)
+    if settings.limit_kind == "nodes":
+        limit, budget = chess.engine.Limit(nodes=settings.limit_value * len(root)), {"nodes": settings.limit_value * len(root)}
+    else:
+        limit, budget = settings.limit(), {"depth": settings.limit_value}
     # A fresh game token clears the hash, so probes never influence (or depend on) the position results.
-    infos = engine.analyse(board, settings.limit(), multipv=len(moves), game=object(), info=INFO,
-                           root_moves=[board.parse_uci(m) for m in moves])
+    infos = engine.analyse(board, limit, multipv=len(root), game=object(), info=INFO, root_moves=root)
     results = tuple({"uci": i["pv"][0].uci(), "score_cp": i["score"].white().score(), "mate": i["score"].white().mate()}
                     for i in infos if i.get("pv"))
-    return Probe(position, moves, results)
+    return Probe(position, kind, tuple(m.uci() for m in root), results, budget)
 
 
 class Analyzer:
@@ -162,7 +176,7 @@ class Analyzer:
         t = time.perf_counter()
         try:
             positions = analyze_game(self.engine, self.settings, game)
-            probes = [run_probe(self.engine, self.settings, game, p, m) for p, m in probe_requests(game, positions)]
+            probes = [run_probe(self.engine, self.settings, game, *request) for request in probe_requests(game)]
         except chess.engine.EngineError as e:  # includes the engine process dying
             self.close()
             self.engine = self.factory()

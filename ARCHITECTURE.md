@@ -278,29 +278,39 @@ classified. Deterministic `events` never carry engine data.
 
 ### Underpromotion: two separate questions
 
-`UNDERPROMOTION` stays a Layer 1 event. The engine layer answers two different questions about it, and
-stores them separately:
+`UNDERPROMOTION` stays a Layer 1 event. The engine layer answers two different questions about it, each
+with its own search (`engine_move_probes`, one row per kind), and never lets one stand in for the other:
 
-- **A. Was the underpromotion the best move in the position?** This compares the played move against
-  *all* legal moves, from `engine_positions[position k−1]`. The comparison is by score, not by move string:
-  `is_best` = the played move's score equals the best score (same centipawns, or same mate distance).
-  `uniquely_best` = it's best and no other move scores the same. Example: if `=Q#` and `=R#` both mate, the
-  rook underpromotion is tied for best, not uniquely best. The played move's rank comes from MultiPV when it's
-  in the top *k*. Otherwise only "not in top *k*" is known.
-- **B. Was underpromoting better than queening on the same square?** A restricted search from the same
-  position (`engine_move_probes`, `searchmoves = {played underpromotion, queen promotion}`, MultiPV 2) scores
-  both moves in one search under the same config, so the comparison is fair. This gives `better_than_queen`
-  and `queen_promotion_eval`, and supports statements like "queening here would have thrown away the win".
+- **A. Was the underpromotion the best move in the position?** (`kind = 'all_moves'`) One search from the
+  position before the move with `searchmoves` = **every legal move** and MultiPV = their number, so every
+  root move is scored in the same search iteration. Budget: config nodes × number of legal moves (each move
+  gets about the normal per-position effort); depth configs search every line to the configured depth.
+  - `is_best_move`: the played move scores at least as well as **every** legal move.
+  - `tied_for_best_move`: best, and some other move scores exactly the same. For example, if `=Q#` and `=R#`
+    both mate in 1, the rook underpromotion is tied, not unique.
+  - `unique_best_move`: best, and strictly better than every other legal move.
+  - `played_move_rank`: 1 + the number of moves scoring strictly better.
+  - If the search didn't return a score for every legal move, all four are `null`. Never guess: an unscored
+    move might be better.
+- **B. Was underpromoting better than queening on the same square?** (`kind = 'vs_queen'`) One search
+  over exactly {played underpromotion, queen promotion}, MultiPV 2, budget config nodes × 2. Gives
+  `better_than_queen` (strictly better; equal is not better) plus both evaluations. It supports statements
+  like "queening here would have thrown away the win".
 
-Probes run inside the same per-game task, after the game's positions: one restricted search per
-underpromotion over {played move, queening on the same square, the engine's best move}, each with the hash
-cleared, so the position results are identical whether or not probes ran. `is_best_move` for an underpromotion
-is decided inside that one search: the played move scores at least as well as the engine's own choice.
+Why A needs every legal move: an unrestricted search's first choice is not ground truth. In the
+Saavedra-style test position, a 20k-node unrestricted search picked `Kd3` (+7.2), while scoring all 10
+legal moves shows `g8=R` mates in 2 (and `Kc3` mates in 5). Comparing only against the engine's pick, or
+against a few candidates, could both wrongly deny and wrongly grant "best". For ordinary moves (no probe),
+events carry only `matches_engine_choice` (the played move is the unrestricted search's first choice) and
+`rank_in_engine_lines` (within MultiPV lines, if any), and never `is_best_move`.
 
-**Why not just compare against `best_move`:** in the Saavedra-style test position, a 20k-node unrestricted
-search picked `Kd3` (+7.2), while the probe, searching only three moves, found that `g8=R` mates in 2.
-Low-node searches can miss what a focused search finds, so string-comparing against the engine's pick would
-wrongly call the underpromotion "not best".
+Probes run inside the same per-game task, after the game's positions, each with the hash cleared, so the
+position results are identical whether or not probes ran.
+
+**Cost, measured on 19 real underpromotions** (median 30 legal moves, max 44): the all-moves search takes
+0.17 s median (0.99 s max) at 25k nodes per move, 0.61 s median (3.95 s max) at 100k. That's 4.7 s and 17.5 s in total
+for the whole history, and every search scored every legal move. The queen comparison adds under 1 s in total.
+Exhaustive is affordable because underpromotions are rare.
 
 The combined answer is produced at query time (`chesstrove events --engine`, `GET /events?engine=true`):
 
@@ -308,10 +318,17 @@ The combined answer is produced at query time (`chesstrove events --engine`, `GE
 {"type": "UNDERPROMOTION",
  "metadata": {"promotion_piece": "knight", "gave_check": true, "gave_mate": false,
               "queen_gives_check": false, "queen_gives_mate": false, "queen_stalemates": false},
- "engine_analysis": {"config": {"engine": "Stockfish 17.1", "nodes": 250000},
-                     "is_best_move": true, "uniquely_best": true, "played_move_rank": 1,
-                     "best_move": "e7e8n", "evaluation": 520,
-                     "queen_promotion_evaluation": 15, "better_than_queen": true}}
+ "engine_analysis": {"config": {"id": 1, "engine": "Stockfish 18", "nodes": 25000, "multipv": 1},
+                     "eval_before": {"cp": 470}, "eval_after": {"cp": 455},
+                     "engine_choice": "e7e8n", "matches_engine_choice": true,
+                     "is_best_move": true, "tied_for_best_move": false, "unique_best_move": true,
+                     "played_move_rank": 1,
+                     "all_moves": {"legal_moves": 10, "scored": 10, "budget": {"nodes": 250000},
+                                   "evaluation": {"cp": 486}, "best_moves": ["e7e8n"],
+                                   "best_evaluation": {"cp": 486}},
+                     "better_than_queen": true,
+                     "vs_queen": {"evaluation": {"cp": 404}, "queen_promotion_evaluation": {"cp": 0},
+                                  "budget": {"nodes": 50000}}}}
 ```
 
 Rule-based facts (`queen_gives_mate` and so on) and engine facts sit side by side, and never substitute for

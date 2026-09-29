@@ -183,13 +183,18 @@ CREATE TABLE IF NOT EXISTS engine_positions (
     CHECK ((score_cp IS NULL) <> (mate IS NULL))
 );
 
--- Restricted searches (UCI searchmoves) that score a specific set of root moves in ONE search, so they
--- compare fairly: e.g. an underpromotion vs. queening on the same square vs. the engine's best move.
+-- One search that scores every move in `moves` (searchmoves + MultiPV = all of them), so the scores
+-- compare directly. kind = 'vs_queen' (underpromotion vs. queening) or 'all_moves' (every legal move:
+-- the only basis for saying a move was the best one).
 CREATE TABLE IF NOT EXISTS engine_move_probes (
     config_id   bigint NOT NULL REFERENCES engine_configs ON DELETE CASCADE,
     game_id     bigint NOT NULL REFERENCES games ON DELETE CASCADE,
     position    int NOT NULL,                 -- searched from here (the position before the move)
+    kind        text NOT NULL,
     moves       text[] NOT NULL,              -- the only root moves considered
     results     jsonb NOT NULL,               -- ranked [{uci, score_cp, mate}], White's POV
+    budget      jsonb NOT NULL,               -- {"nodes": total} or {"depth": d}, as searched
     PRIMARY KEY (config_id, game_id, position, moves)
 );
+ALTER TABLE engine_move_probes ADD COLUMN IF NOT EXISTS kind text NOT NULL DEFAULT 'vs_queen';
+ALTER TABLE engine_move_probes ADD COLUMN IF NOT EXISTS budget jsonb NOT NULL DEFAULT '{}';
