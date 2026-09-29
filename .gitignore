@@ -8,3 +8,9 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Web app
+web/node_modules
+.impeccable/review
+web/*.tsbuildinfo
+.impeccable/questions

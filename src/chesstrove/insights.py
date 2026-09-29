@@ -6,6 +6,7 @@ engine answers always name the config that produced them.
 
 from typing import Any
 
+import chess
 import chess.engine
 import psycopg
 
@@ -73,9 +74,48 @@ def _analysis(config: dict, row: dict | None) -> dict | None:
         "matches_engine_choice": played == row["best_uci"],
         "rank_in_engine_lines": next((i + 1 for i, l in enumerate(lines) if l["uci"] == played), None),
     }
-    out.update(_verdicts(played, flip, row["vs_queen"], row["vs_queen_budget"],
+    out.update(_verdicts(played, flip, _board_before(row), row["vs_queen"], row["vs_queen_budget"],
                          row["all_moves"], row["all_moves_list"], row["all_moves_budget"]))
     return out
+
+
+def _board_before(row: dict) -> chess.Board:
+    return chess.Board(row["fen_before"] or chess.STARTING_FEN, chess960=row["chess960"])
+
+
+def _transposition_keys(board: chess.Board, lines: list[dict]) -> dict[str, str]:
+    """uci -> a key; moves with the same key are one choice, so any score gap between them is search noise.
+
+    - Promotions on the same square whose best reply captures the new piece there (with any piece): whatever
+      takes on that square, the resulting position is identical for =Q, =R, =B or =N, so the opponent faces
+      the same set of outcomes and the values are equal. (E.g. exf1=R+ Kxf1 vs exf1=Q+ Rxf1.)
+    - Otherwise: the exact position after the move and the engine's best reply (a real transposition).
+    - Moves without a reply in their line (mate, or a line cut short) are only equal to themselves.
+    """
+    keys = {}
+    for line in lines:
+        pv = line.get("pv") or []
+        keys[line["uci"]] = line["uci"]
+        if len(pv) >= 2 and len(pv[0]) == 5 and pv[1][2:4] == pv[0][2:4]:
+            keys[line["uci"]] = f"promotion {pv[0][:4]} captured"
+            continue
+        if len(pv) >= 2:
+            b = board.copy(stack=False)
+            try:
+                b.push_uci(pv[0])
+                b.push_uci(pv[1])
+            except ValueError:
+                continue
+            keys[line["uci"]] = b.epd()  # position without move counters
+    return keys
+
+
+def _class_scores(scores: dict[str, chess.engine.Score], keys: dict[str, str]) -> dict[str, chess.engine.Score]:
+    """Every move scores as the best member of its transposition class."""
+    best: dict[str, chess.engine.Score] = {}
+    for uci, score in scores.items():
+        best[keys[uci]] = max(best.get(keys[uci], score), score)
+    return {uci: best[keys[uci]] for uci in scores}
 
 
 def _deeper(probes: list[dict], row: dict) -> list[dict]:
@@ -86,40 +126,47 @@ def _deeper(probes: list[dict], row: dict) -> list[dict]:
     blocks = []
     for entry in by_config.values():
         q, a = entry.get("vs_queen"), entry.get("all_moves")
-        verdict = _verdicts(row["uci"], row["color"] == "b",
+        verdict = _verdicts(row["uci"], row["color"] == "b", _board_before(row),
                             q and q["results"], q and q["budget"], a and a["results"], a and a["moves"], a and a["budget"])
         if verdict:
             blocks.append({"config": _config_label(entry["config"]), **verdict})
     return blocks
 
 
-def _verdicts(played: str, flip: bool, vs_queen: list | None, vs_queen_budget: dict | None,
+def _verdicts(played: str, flip: bool, board: chess.Board, vs_queen: list | None, vs_queen_budget: dict | None,
               all_moves: list | None, all_moves_list: list | None, all_moves_budget: dict | None) -> dict:
     out: dict[str, Any] = {}
     if vs_queen:  # B. underpromotion vs. queening on the same square, scored in one search
         scores = {r["uci"]: _pov(r["score_cp"], r["mate"], flip) for r in vs_queen}
+        keys = _transposition_keys(board, vs_queen)
         queen = played[:4] + "q"
         if played in scores and queen in scores:
+            transposes = keys[played] == keys[queen]
             out["vs_queen"] = {"evaluation": _show(scores[played]), "queen_promotion_evaluation": _show(scores[queen]),
-                               "budget": vs_queen_budget}
-            out["better_than_queen"] = scores[played] > scores[queen]
+                               "transposes_with_queen": transposes, "budget": vs_queen_budget}
+            # identical positions after the reply are equal, whatever noise the two scores carry
+            out["better_than_queen"] = not transposes and scores[played] > scores[queen]
     if all_moves is not None:  # A. the played move vs. every legal move, scored in one search
-        out.update(_best_move_verdict(played, flip, all_moves, all_moves_list, all_moves_budget))
+        out.update(_best_move_verdict(played, flip, board, all_moves, all_moves_list, all_moves_budget))
     return out
 
 
-def _best_move_verdict(played: str, flip: bool, results: list, legal: list, budget: dict) -> dict:
-    """is_best_move / tied_for_best_move / unique_best_move, only when every legal move got a score."""
-    scores = {r["uci"]: _pov(r["score_cp"], r["mate"], flip) for r in results}
-    complete = set(scores) == set(legal) and played in scores
-    verdict: dict[str, Any] = {"all_moves": {"legal_moves": len(legal), "scored": len(scores), "budget": budget}}
+def _best_move_verdict(played: str, flip: bool, board: chess.Board, results: list, legal: list, budget: dict) -> dict:
+    """is_best_move / tied_for_best_move / unique_best_move, only when every legal move got a score.
+    Moves that transpose into the same position are one choice, so they tie rather than rank."""
+    raw = {r["uci"]: _pov(r["score_cp"], r["mate"], flip) for r in results}
+    complete = set(raw) == set(legal) and played in raw
+    verdict: dict[str, Any] = {"all_moves": {"legal_moves": len(legal), "scored": len(raw), "budget": budget}}
     if not complete:  # never guess: an unscored legal move might be better
         return {**verdict, "is_best_move": None, "tied_for_best_move": None, "unique_best_move": None,
                 "played_move_rank": None}
+    keys = _transposition_keys(board, results)
+    scores = _class_scores(raw, keys)
     top = max(scores.values())
     best = sorted(u for u, sc in scores.items() if sc == top)
     is_best = scores[played] == top
-    verdict["all_moves"].update(evaluation=_show(scores[played]), best_moves=best, best_evaluation=_show(top))
+    verdict["all_moves"].update(evaluation=_show(raw[played]), best_moves=best, best_evaluation=_show(top),
+                                transposes_with=sorted(u for u in raw if u != played and keys[u] == keys[played]))
     return {**verdict,
             "is_best_move": is_best,
             "tied_for_best_move": is_best and len(best) > 1,

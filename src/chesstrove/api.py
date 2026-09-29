@@ -1,7 +1,8 @@
-"""Minimal REST API over the same functions the CLI uses. Run: `chesstrove serve` (localhost only, no auth).
+"""The web app: a REST API under /api (the same functions the CLI uses) and the site itself at /.
+Run: `chesstrove serve` (localhost only, no auth yet).
 
 Long jobs (imports, reanalysis) return 202 with the new row's id and run in the background;
-poll GET /imports/{id} or GET /analysis-runs/{id}.
+poll GET /api/imports/{id} or GET /api/analysis-runs/{id}.
 """
 
 import logging
@@ -9,7 +10,11 @@ from collections.abc import Iterator
 from datetime import date
 from typing import Annotated, Literal
 
-from fastapi import BackgroundTasks, Body, Depends, FastAPI, HTTPException, Query, Request
+from importlib.resources import files
+
+from fastapi import APIRouter, BackgroundTasks, Body, Depends, FastAPI, HTTPException, Path, Query, Request
+from fastapi.staticfiles import StaticFiles
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from pydantic import BaseModel, Field
 
 from chesstrove import db, detectors, insights, labels
@@ -17,10 +22,14 @@ from chesstrove.analysis import reanalyze
 from chesstrove.ingest import import_chesscom, import_lichess, import_pgn
 
 log = logging.getLogger(__name__)
-app = FastAPI(title="ChessTrove", description="Search every motif in your chess history.")
+app = FastAPI(title="ChessTrove", description="Search every motif in your chess history.",
+              docs_url="/api/docs", openapi_url="/api/openapi.json")
+api = APIRouter(prefix="/api")
 
 Limit = Annotated[int, Query(ge=1, le=1000)]
 Offset = Annotated[int, Query(ge=0)]
+Platform = Literal["chesscom", "lichess"]
+Username = Annotated[str, Path(min_length=1, max_length=50, pattern=r"^[A-Za-z0-9_-]+$")]
 
 
 def conn() -> Iterator:
@@ -45,7 +54,7 @@ class AccountImport(BaseModel):
     user: str = Field("me", min_length=1, max_length=100)
 
 
-@app.post("/imports/pgn", status_code=202)
+@api.post("/imports/pgn", status_code=202)
 async def create_pgn_import(request: Request, background: BackgroundTasks, c: Conn,
                             name: Annotated[str, Query(max_length=200)] = "upload.pgn") -> dict:
     """Body: raw PGN text (one or many games)."""
@@ -57,12 +66,12 @@ async def create_pgn_import(request: Request, background: BackgroundTasks, c: Co
     return {"import_id": import_id, "status": "running"}
 
 
-@app.post("/imports/chesscom", status_code=202)
+@api.post("/imports/chesscom", status_code=202)
 def create_chesscom_import(body: AccountImport, background: BackgroundTasks, c: Conn) -> dict:
     return _start_account_import(c, background, "chesscom", import_chesscom, body)
 
 
-@app.post("/imports/lichess", status_code=202)
+@api.post("/imports/lichess", status_code=202)
 def create_lichess_import(body: AccountImport, background: BackgroundTasks, c: Conn) -> dict:
     return _start_account_import(c, background, "lichess", import_lichess, body)
 
@@ -74,33 +83,44 @@ def _start_account_import(c, background: BackgroundTasks, source: str, job, body
     return {"import_id": import_id, "status": "running"}
 
 
-@app.get("/imports")
+@api.get("/imports")
 def list_imports(c: Conn) -> list[dict]:
     return db.list_imports(c)
 
 
-@app.get("/imports/{import_id}")
+@api.get("/imports/{import_id}")
 def get_import(import_id: int, c: Conn) -> dict:
     return _found(db.get_import(c, import_id), "import")
 
 
 # --- games -----------------------------------------------------------------------------------------
 
-@app.get("/games")
-def list_games(c: Conn, player: str | None = None, limit: Limit = 50, offset: Offset = 0) -> list[dict]:
-    return db.list_games(c, player, limit, offset)
+@api.get("/players/{platform}/{username}")
+def player(platform: Platform, username: Username, c: Conn) -> dict:
+    """A player page's data: record, rating, motif counts (theirs vs. against them), engine coverage, and
+    the latest import. `games: 0` with no import means "not imported yet"."""
+    return db.player_summary(c, platform, username)
 
 
-@app.get("/games/{game_id}")
-def get_game(game_id: int, c: Conn) -> dict:
+@api.get("/games")
+def list_games(c: Conn, player: str | None = None, platform: Platform | None = None,
+               limit: Limit = 50, offset: Offset = 0) -> list[dict]:
+    return db.list_games(c, player, limit, offset, platform)
+
+
+@api.get("/games/{game_id}")
+def get_game(game_id: int, c: Conn, engine: bool = False) -> dict:
+    """With `engine=true`: `engine_positions`, the evaluation of every position (default config)."""
     game = _found(db.get_game(c, game_id), "game")
     game["events"] = db.list_events(c, game_id=game_id, limit=10_000)
+    if engine and (config := db.default_engine_config(c)):
+        game["engine_positions"] = db.game_engine_positions(c, game_id, config["id"])
     return game
 
 
 # --- events & detectors ----------------------------------------------------------------------------
 
-@app.get("/events")
+@api.get("/events")
 def list_events(
     c: Conn,
     type: str | None = None,
@@ -109,18 +129,21 @@ def list_events(
     since: date | None = None,
     until: date | None = None,
     game_id: int | None = None,
+    platform: Platform | None = None,
+    against: str | None = None,
     limit: Limit = 50,
     offset: Offset = 0,
     engine: bool = False,
     engine_config: int | None = None,
 ) -> list[dict]:
-    """`player` = moves played by that username (matched to the event's color). Dates are inclusive.
+    """`player` = moves played by that username (matched to the event's color); `against` = moves played
+    by that username's opponents. Dates are inclusive.
     `engine=true` attaches Stockfish analysis (default config: the one covering the most games)."""
-    found = db.list_events(c, type, color, player, since, until, game_id, limit, offset)
+    found = db.list_events(c, type, color, player, since, until, game_id, limit, offset, platform, against)
     return insights.annotate(c, found, engine_config) if engine or engine_config else found
 
 
-@app.get("/detectors")
+@api.get("/detectors")
 def list_detectors() -> list[dict]:
     return [{"id": d.id, "version": d.version, "definition": (d.__doc__ or "").strip()} for d in detectors.DETECTORS]
 
@@ -130,7 +153,7 @@ class ReanalyzeRequest(BaseModel):
     all: bool = False  # redo every game, not just stale ones
 
 
-@app.post("/analysis-runs", status_code=202)
+@api.post("/analysis-runs", status_code=202)
 def create_analysis_run(background: BackgroundTasks, c: Conn, body: Annotated[ReanalyzeRequest, Body()] = ReanalyzeRequest()) -> dict:
     try:
         chosen = detectors.select(body.detectors)  # reject unknown ids now, not in the background
@@ -141,29 +164,30 @@ def create_analysis_run(background: BackgroundTasks, c: Conn, body: Annotated[Re
     return {"run_id": run_id, "status": "running"}
 
 
-@app.get("/analysis-runs")
+@api.get("/analysis-runs")
 def list_analysis_runs(c: Conn, limit: Limit = 50) -> list[dict]:
     return db.list_analysis_runs(c, limit)
 
 
-@app.get("/analysis-runs/{run_id}")
+@api.get("/analysis-runs/{run_id}")
 def get_analysis_run(run_id: int, c: Conn) -> dict:
     return _found(db.get_analysis_run(c, run_id), "analysis run")
 
 
 # --- status & engine (Layer 2) ---------------------------------------------------------------------
 
-@app.get("/status")
+@api.get("/status")
 def status(c: Conn) -> dict:
     """Games and positions indexed, deterministic coverage, and progress per engine config."""
     return db.status_summary(c, {d.id: d.version for d in detectors.DETECTORS})
 
 
-@app.get("/engine-labels")
+@api.get("/engine-labels")
 def engine_labels(
     c: Conn,
     type: Literal["BLUNDER", "MISSED_WIN", "ONLY_WINNING_MOVE"],
     player: str | None = None,
+    platform: Platform | None = None,
     config: int | None = None,
     blunder: Annotated[float, Query(gt=0, le=1)] = labels.Thresholds().blunder,
     winning: Annotated[float, Query(gt=0, le=1)] = labels.Thresholds().winning,
@@ -175,10 +199,10 @@ def engine_labels(
     """Derived from stored evaluations at query time: change a threshold or scale and everything relabels
     instantly."""
     return labels.query(c, type, labels.Thresholds(blunder, winning, not_winning), config, player, limit,
-                        scale, include_recaptures)
+                        scale, include_recaptures, platform)
 
 
-@app.get("/engine-runs")
+@api.get("/engine-runs")
 def list_engine_runs(c: Conn, limit: Limit = 50) -> list[dict]:
     """Engine runs are started from the CLI (`chesstrove engine analyze`): they're long local batch jobs."""
     return db.list_engine_runs(c, limit)
@@ -192,3 +216,20 @@ def _in_new_connection(job, *args, **kwargs) -> None:
             job(c, *args, **kwargs)
     except Exception:
         log.exception("background job %s failed", job.__name__)
+
+
+class SiteFiles(StaticFiles):
+    """The built React app (web/ -> src/chesstrove/web). Unknown paths get index.html, so client-side
+    routes like /u/chesscom/name load the app; /api/* never falls through to it."""
+
+    async def get_response(self, path: str, scope):
+        try:
+            return await super().get_response(path, scope)
+        except StarletteHTTPException as e:  # what StaticFiles raises (FastAPI's is a subclass)
+            if e.status_code != 404 or path.startswith("api/"):
+                raise
+            return await super().get_response("index.html", scope)
+
+
+app.include_router(api)
+app.mount("/", SiteFiles(directory=str(files("chesstrove") / "web"), html=True), name="web")  # last: /api wins

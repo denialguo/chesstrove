@@ -18,6 +18,7 @@ needs_stockfish = pytest.mark.skipif(shutil.which("stockfish") is None, reason="
 
 
 ROOT_SCORES: dict[str, int] = {}  # uci -> White-POV centipawns for restricted searches; tests set it
+ROOT_REPLIES: dict[str, str] = {}  # uci -> the reply in that move's line (reveals transpositions)
 
 
 class FakeEngine:
@@ -41,7 +42,8 @@ class FakeEngine:
             self.probes.append((len(board.move_stack), [m.uci() for m in root_moves], limit))
             lines = sorted(root_moves, key=lambda m: -ROOT_SCORES.get(m.uci(), 0))
             lines = lines[: len(lines) - self.drop_probe_lines]
-            return [{"score": chess.engine.PovScore(chess.engine.Cp(ROOT_SCORES.get(m.uci(), 0)), chess.WHITE), "pv": [m]}
+            return [{"score": chess.engine.PovScore(chess.engine.Cp(ROOT_SCORES.get(m.uci(), 0)), chess.WHITE),
+                     "pv": [m] + ([chess.Move.from_uci(ROOT_REPLIES[m.uci()])] if m.uci() in ROOT_REPLIES else [])}
                     for m in lines]
         self.calls.append((len(board.move_stack), board.root().fen(), game))
         move = next(iter(board.legal_moves))
@@ -240,10 +242,11 @@ WHITE_UNDER = '[White "alice"]\n[Black "bob"]\n[Result "*"]\n[SetUp "1"]\n[FEN "
 BLACK_UNDER = '[White "bob"]\n[Black "alice"]\n[Result "*"]\n[SetUp "1"]\n[FEN "4k3/8/8/8/8/8/p7/7K b - - 0 1"]\n\n1... a1=B *\n'
 
 
-def underpromotion_analysis(conn, monkeypatch, scores, pgn=WHITE_UNDER + "\n" + BLACK_UNDER, **fake):
+def underpromotion_analysis(conn, monkeypatch, scores, pgn=WHITE_UNDER + "\n" + BLACK_UNDER, replies=None, **fake):
     from chesstrove import insights
 
     monkeypatch.setattr(__import__(__name__), "ROOT_SCORES", scores)
+    monkeypatch.setattr(__import__(__name__), "ROOT_REPLIES", replies or {})
     import_pgn(conn, pgn, "g.pgn")
     engine.run(conn, TINY, engine_factory=lambda: FakeEngine(**fake))
     return {e["color"]: e["engine_analysis"] for e in insights.annotate(conn, db.list_events(conn, type="UNDERPROMOTION"))}
@@ -259,9 +262,10 @@ def test_probes_cover_the_queen_question_and_every_legal_move(conn, monkeypatch)
     assert [p["kind"] for p in probes] == ["all_moves", "vs_queen"]
     assert set(probes[0]["moves"]) == legal and len(legal) == 9  # 4 promotions + 5 king moves
     assert probes[1]["moves"] == ["a7a8n", "a7a8q"]
-    # budget scales with the number of root moves: each gets about the normal per-position effort
-    assert (probes[0]["budget"], probes[1]["budget"]) == ({"nodes": 9 * 2_000}, {"nodes": 2 * 2_000})
-    assert [p[2].nodes for p in fake.probes] == [2 * 2_000, 9 * 2_000]
+    # depth-limited at the depth the normal analysis reached (the fake reports 5), so every line finishes
+    # the same iteration and the scores compare
+    assert (probes[0]["budget"], probes[1]["budget"]) == ({"depth": 5}, {"depth": 5})
+    assert [(p[2].depth, p[2].nodes) for p in fake.probes] == [(5, None), (5, None)]
 
 
 def test_unique_best_and_better_than_queen(conn, monkeypatch):
@@ -342,3 +346,59 @@ def test_stockfish_saavedra_rook_underpromotion_is_the_unique_best_move(conn):
     a = e["engine_analysis"]
     assert (a["is_best_move"], a["unique_best_move"], a["better_than_queen"]) == (True, True, True)
     assert a["all_moves"]["evaluation"] == {"mate": 2} and a["vs_queen"]["queen_promotion_evaluation"] == {"cp": 0}
+
+
+# b8=R+ and b8=Q+ both get taken by ...Rxb8: the same position either way.
+DOOMED_PROMOTION = '[White "alice"]\n[Black "bob"]\n[Result "*"]\n[SetUp "1"]\n[FEN "r3k3/1P6/8/8/8/8/8/4K3 w - - 0 1"]\n\n1. b8=R+ *\n'
+
+
+def test_promotions_that_transpose_are_equal_whatever_the_noise(conn, monkeypatch):
+    # The rook line scores 0.30 higher, but after ...Rxb8 both lines reach the identical position.
+    a = underpromotion_analysis(conn, monkeypatch, {"b7b8r": 50, "b7b8q": 20}, pgn=DOOMED_PROMOTION,
+                                replies={"b7b8r": "a8b8", "b7b8q": "a8b8"})["w"]
+    assert (a["better_than_queen"], a["vs_queen"]["transposes_with_queen"]) == (False, True)
+    assert (a["is_best_move"], a["tied_for_best_move"], a["unique_best_move"]) == (True, True, False)
+    assert a["all_moves"]["transposes_with"] == ["b7b8q"] and a["all_moves"]["best_moves"] == ["b7b8q", "b7b8r"]
+
+
+# King c7 and rook a8 both guard b8: the new piece can be taken two different ways.
+TWO_CAPTURERS = '[White "alice"]\n[Black "bob"]\n[Result "*"]\n[SetUp "1"]\n[FEN "r7/1Pk5/8/8/8/8/8/4K3 w - - 0 1"]\n\n1. b8=R *\n'
+
+
+def test_promoted_piece_taken_by_different_pieces_is_still_equal(conn, monkeypatch):
+    # =R is met by ...Rxb8 and =Q+ by ...Kxb8: different positions, but either capture is available against
+    # either promotion, and each gives the same position whatever piece stood on b8. Equal.
+    a = underpromotion_analysis(conn, monkeypatch, {"b7b8r": 50, "b7b8q": 20}, pgn=TWO_CAPTURERS,
+                                replies={"b7b8r": "a8b8", "b7b8q": "c7b8"})["w"]
+    assert (a["vs_queen"]["transposes_with_queen"], a["better_than_queen"], a["unique_best_move"]) == (True, False, False)
+
+
+def test_promotion_not_captured_in_one_line_is_not_equal(conn, monkeypatch):
+    a = underpromotion_analysis(conn, monkeypatch, {"b7b8r": 50, "b7b8q": 20}, pgn=TWO_CAPTURERS,
+                                replies={"b7b8r": "a8b8", "b7b8q": "c7d7"})["w"]
+    assert (a["vs_queen"]["transposes_with_queen"], a["better_than_queen"]) == (False, True)
+
+
+def test_different_replies_do_not_transpose(conn, monkeypatch):
+    a = underpromotion_analysis(conn, monkeypatch, {"b7b8r": 50, "b7b8q": 20}, pgn=DOOMED_PROMOTION,
+                                replies={"b7b8r": "a8b8", "b7b8q": "e8e7"})["w"]
+    assert (a["better_than_queen"], a["vs_queen"]["transposes_with_queen"], a["unique_best_move"]) == (True, False, True)
+
+
+@needs_stockfish
+def test_stockfish_doomed_promotion_transposes_with_queening(conn):
+    from chesstrove import insights
+
+    import_pgn(conn, DOOMED_PROMOTION, "g.pgn")
+    engine.run(conn, EngineSettings(limit_value=20_000))
+    [e] = insights.annotate(conn, db.list_events(conn, type="UNDERPROMOTION"))
+    a = e["engine_analysis"]
+    assert a["vs_queen"]["transposes_with_queen"] and a["better_than_queen"] is False
+    assert "b7b8q" in a["all_moves"]["transposes_with"]
+
+
+def test_probe_depth_is_capped():
+    fake = FakeEngine()
+    [game] = read_pgn(WHITE_UNDER)
+    probe = engine.run_probe(fake, TINY, game, 0, "vs_queen", ("a7a8n", "a7a8q"), depth=245)  # a proven mate's depth
+    assert probe.budget == {"depth": engine.PROBE_MAX_DEPTH} and fake.probes[0][2].depth == engine.PROBE_MAX_DEPTH

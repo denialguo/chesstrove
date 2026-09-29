@@ -40,6 +40,7 @@ def query(
     limit: int = 50,
     scale: Scale = "lichess",
     include_recaptures: bool = False,
+    platform: str | None = None,
 ) -> list[dict]:
     """Labelled moves, most dramatic first (largest expected-score drop; for ONLY_WINNING_MOVE, the
     biggest gap between the only winning move and the runner-up, quiet moves first among equals).
@@ -48,4 +49,4 @@ def query(
     if config is None:
         return []
     return db.engine_label_rows(conn, label, config["id"], t.blunder, t.winning, t.not_winning, player, limit,
-                                scale, include_recaptures)
+                                scale, include_recaptures, platform)

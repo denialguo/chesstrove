@@ -28,6 +28,8 @@ from chesstrove.models import CanonicalGame
 from chesstrove.reconstruction import start_board
 
 PV_MAX = 12  # plies of principal variation kept per position; bounds storage
+PROBE_PV_MAX = 4  # per probe line: enough to see the reply (e.g. the capture of a promoted piece)
+PROBE_MAX_DEPTH = 30  # a proven mate reports depth 245; searching every legal move that deep never ends
 FETCH_BATCH = 50  # games loaded per query while feeding workers
 INFO = chess.engine.INFO_BASIC | chess.engine.INFO_SCORE | chess.engine.INFO_PV
 
@@ -153,10 +155,18 @@ def probe_requests(game: CanonicalGame) -> list[tuple[int, str, tuple[str, ...] 
 
 
 def run_probe(engine: Any, settings: EngineSettings, game: CanonicalGame, position: int,
-              kind: Literal["vs_queen", "all_moves", "top_two"], moves: tuple[str, ...] | None = None) -> Probe:
-    """Deliberately more expensive than a normal position and only used where it's needed. With a node
-    limit the budget is the config's per-position nodes x the number of lines, so each line gets about
-    the normal per-position effort; with a depth limit, every line is searched to that depth."""
+              kind: Literal["vs_queen", "all_moves", "top_two"], moves: tuple[str, ...] | None = None,
+              depth: int | None = None) -> Probe:
+    """A multi-line search whose lines are compared with each other, so it is always depth-limited: every
+    line finishes the same iteration. A node limit would stop mid-iteration, leaving some lines a depth
+    deeper than others, and their scores not comparable (seen on a real game: a 270 cp disagreement).
+    `depth`: for node-limited configs, the depth the normal analysis reached at this position; depth
+    configs use their own depth."""
+    if settings.limit_kind == "depth":
+        depth = settings.limit_value
+    if not depth:
+        raise ValueError("probes need a depth: pass the position's analysis depth, or use a depth config")
+    depth = min(depth, PROBE_MAX_DEPTH)
     board = start_board(game)
     for uci in game.moves_uci[:position]:
         board.push_uci(uci)
@@ -165,15 +175,14 @@ def run_probe(engine: Any, settings: EngineSettings, game: CanonicalGame, positi
     else:
         root = [board.parse_uci(m) for m in moves] if moves else list(board.legal_moves)
         lines = len(root)
-    if settings.limit_kind == "nodes":
-        limit, budget = chess.engine.Limit(nodes=settings.limit_value * lines), {"nodes": settings.limit_value * lines}
-    else:
-        limit, budget = settings.limit(), {"depth": settings.limit_value}
     # A fresh game token clears the hash, so probes never influence (or depend on) the position results.
-    infos = engine.analyse(board, limit, multipv=lines, game=object(), info=INFO, root_moves=root)
+    infos = engine.analyse(board, chess.engine.Limit(depth=depth), multipv=lines, game=object(), info=INFO,
+                           root_moves=root)
     results = tuple({"uci": i["pv"][0].uci(), "score_cp": i["score"].white().score(), "mate": i["score"].white().mate(),
-                     "wdl": list(i["wdl"].white()) if "wdl" in i else None}
+                     "wdl": list(i["wdl"].white()) if "wdl" in i else None, "depth": i.get("depth"),
+                     "pv": [m.uci() for m in i["pv"][:PROBE_PV_MAX]]}  # the reply reveals transpositions
                     for i in infos if i.get("pv"))
+    budget = {"depth": depth}
     moves_searched = tuple(m.uci() for m in root) if root else tuple(r["uci"] for r in results)
     return Probe(position, kind, moves_searched, results, budget)
 
@@ -190,7 +199,8 @@ class Analyzer:
         t = time.perf_counter()
         try:
             positions = analyze_game(self.engine, self.settings, game)
-            probes = [run_probe(self.engine, self.settings, game, *request) for request in probe_requests(game)]
+            probes = [run_probe(self.engine, self.settings, game, p, kind, moves, depth=positions[p].depth)
+                      for p, kind, moves in probe_requests(game)]
         except chess.engine.EngineError as e:  # includes the engine process dying
             self.close()
             self.engine = self.factory()
@@ -198,10 +208,10 @@ class Analyzer:
         return GameAnalysis(game_id, positions, probes, time.perf_counter() - t)
 
     def probe(self, game_id: int, game: CanonicalGame, position: int, kind: str,
-              moves: tuple[str, ...] | None = None) -> ProbeResult | GameFailure:
+              moves: tuple[str, ...] | None = None, depth: int | None = None) -> ProbeResult | GameFailure:
         t = time.perf_counter()
         try:
-            probe = run_probe(self.engine, self.settings, game, position, kind, moves)
+            probe = run_probe(self.engine, self.settings, game, position, kind, moves, depth)
         except chess.engine.EngineError as e:
             self.close()
             self.engine = self.factory()
@@ -229,7 +239,7 @@ def _work(task: tuple) -> GameAnalysis | ProbeResult | GameFailure:
 
 
 def _dispatch(analyzer: Analyzer, task: tuple) -> GameAnalysis | ProbeResult | GameFailure:
-    """Tasks are ("game", game_id, game) or ("probe", game_id, game, position, kind, moves)."""
+    """Tasks are ("game", game_id, game) or ("probe", game_id, game, position, kind, moves, depth)."""
     kind, *args = task
     return analyzer(*args) if kind == "game" else analyzer.probe(*args)
 
@@ -346,6 +356,7 @@ def verify_only_winning_moves(
     workers: int = 1,
     progress: Callable[[dict], None] | None = None,
     engine_factory: Callable[[], Any] | None = None,
+    refresh: bool = False,
 ) -> dict:
     """Stage 2 of ONLY_WINNING_MOVE: a two-line search (top_two probe) only where it can matter: the mover
     was clearly winning and played the engine's choice. Uses the config's own settings, and refuses a
@@ -366,11 +377,14 @@ def verify_only_winning_moves(
         with contextlib.suppress(Exception):
             identify.quit()
 
+    if refresh:
+        db.delete_probes(conn, config["id"], ("top_two",))
     candidates = db.only_winning_move_candidates(conn, config["id"], winning, player)
+    depths = db.position_depths(conn, config["id"], candidates)
     by_game: dict[int, list[int]] = {}
     for game_id, position in candidates:
         by_game.setdefault(game_id, []).append(position)
-    tasks = (("probe", game_id, game, position, "top_two", None)
+    tasks = (("probe", game_id, game, position, "top_two", None, depths.get((game_id, position)))
              for game_id, game in _games(conn, list(by_game)) for position in by_game[game_id])
     done = failed = 0
     started = time.perf_counter()
@@ -393,10 +407,12 @@ def verify_underpromotions(
     stockfish: str | None = None,
     workers: int = 1,
     engine_factory: Callable[[], Any] | None = None,
+    refresh: bool = False,
 ) -> dict:
-    """Re-ask both underpromotion questions (vs_queen, all_moves) under a stronger config, e.g. 1M nodes
-    per move. Stored under that config's own id, next to (never over) the full-history verdicts, and shown
-    as `deeper_verification`. Cheap because underpromotions are rare. Resumable."""
+    """Ask both underpromotion questions (vs_queen, all_moves) under `settings`. A depth config (e.g. depth
+    22) is stored under its own id and shown as `deeper_verification`; the full-history (node) config's own
+    settings recompute its probes at each position's analysis depth. Cheap because underpromotions are rare.
+    Resumable; `refresh` redoes existing probes."""
     if engine_factory is None:
         engine_factory = functools.partial(open_stockfish, stockfish_path(stockfish), settings)
     identify = engine_factory()
@@ -406,13 +422,20 @@ def verify_underpromotions(
         with contextlib.suppress(Exception):
             identify.quit()
     config_id = db.ensure_engine_config(conn, engine_name, settings)
+    if refresh:
+        db.delete_probes(conn, config_id, ("vs_queen", "all_moves"))
     have = db.probe_keys(conn, config_id)
+    underpromotions = db.underpromotion_moves(conn)
+    depths = ({} if settings.limit_kind == "depth"
+              else db.position_depths(conn, config_id, [(g, ply - 1) for g, ply, _ in underpromotions]))
     wanted: dict[int, list[tuple[int, str, tuple[str, ...] | None]]] = {}
-    for game_id, ply, uci in db.underpromotion_moves(conn):
+    for game_id, ply, uci in underpromotions:
+        if settings.limit_kind == "nodes" and (game_id, ply - 1) not in depths:
+            continue  # a node config can only probe positions it has analyzed (it needs their depth)
         for kind, moves in (("vs_queen", (uci, uci[:4] + "q")), ("all_moves", None)):
             if (game_id, ply - 1, kind) not in have:
                 wanted.setdefault(game_id, []).append((ply - 1, kind, moves))
-    tasks = (("probe", game_id, game, position, kind, moves)
+    tasks = (("probe", game_id, game, position, kind, moves, depths.get((game_id, position)))
              for game_id, game in _games(conn, list(wanted)) for position, kind, moves in wanted[game_id])
     done = failed = 0
     started = time.perf_counter()

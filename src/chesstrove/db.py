@@ -158,15 +158,19 @@ def insert_moves(conn: psycopg.Connection, game_id: int, facts: list[MoveFacts])
             ))
 
 
-def list_games(conn: psycopg.Connection, player: str | None = None, limit: int = 50, offset: int = 0) -> list[dict]:
+# A game's platform is the prefix of its dedupe key (chesscom:/lichess:), so it also covers games that
+# arrived as a PGN export. Usernames are only unique per platform.
+def list_games(conn: psycopg.Connection, player: str | None = None, limit: int = 50, offset: int = 0,
+               platform: str | None = None) -> list[dict]:
     return conn.execute(
-        """SELECT id, source, played_at, white, black, white_rating, black_rating, result,
-                  time_control, eco, ply_count
-           FROM games
-           WHERE %(player)s::text IS NULL OR lower(white) = lower(%(player)s) OR lower(black) = lower(%(player)s)
+        """SELECT id, source, source_key, external_id, played_at, white, black, white_rating, black_rating,
+                  result, time_control, eco, opening, ply_count
+           FROM games g
+           WHERE (%(player)s::text IS NULL OR lower(white) = lower(%(player)s) OR lower(black) = lower(%(player)s))
+             AND (%(platform)s::text IS NULL OR split_part(g.source_key, ':', 1) = %(platform)s)
            ORDER BY played_at DESC NULLS LAST, id DESC
            LIMIT %(limit)s OFFSET %(offset)s""",
-        {"player": player, "limit": limit, "offset": offset},
+        {"player": player, "limit": limit, "offset": offset, "platform": platform},
     ).fetchall()
 
 
@@ -268,23 +272,28 @@ def game_from_row(row: dict) -> CanonicalGame:
 def list_events(
     conn: psycopg.Connection, type: str | None = None, color: str | None = None, player: str | None = None,
     since: date | None = None, until: date | None = None, game_id: int | None = None,
-    limit: int = 50, offset: int = 0,
+    limit: int = 50, offset: int = 0, platform: str | None = None, against: str | None = None,
 ) -> list[dict]:
-    """Newest first. `player` means "moves played by this username" (matched to the event's color)."""
+    """Newest first. `player` = moves played by this username (matched to the event's color);
+    `against` = moves played by this username's opponents."""
     return conn.execute(
-        """SELECT e.id, e.game_id, e.ply, e.type, e.detector_version, e.color, e.fen, e.metadata,
-                  g.played_at, g.white, g.black, g.result, g.time_control
+        f"""SELECT e.id, e.game_id, e.ply, e.type, e.detector_version, e.color, e.fen, e.metadata,
+                  g.played_at, g.white, g.black, g.result, g.time_control, g.source_key, g.external_id,
+                  m.san, m.uci, m.fen_after
            FROM events e JOIN games g ON g.id = e.game_id
+           JOIN moves m ON m.game_id = e.game_id AND m.ply = e.ply
            WHERE (%(type)s::text IS NULL OR e.type = %(type)s)
              AND (%(color)s::text IS NULL OR e.color = %(color)s)
              AND (%(player)s::text IS NULL OR lower(CASE e.color WHEN 'w' THEN g.white ELSE g.black END) = lower(%(player)s))
+             AND (%(against)s::text IS NULL OR lower(CASE e.color WHEN 'w' THEN g.black ELSE g.white END) = lower(%(against)s))
              AND (%(since)s::date IS NULL OR g.played_at >= %(since)s)
              AND (%(until)s::date IS NULL OR g.played_at < %(until)s::date + 1)
              AND (%(game_id)s::bigint IS NULL OR e.game_id = %(game_id)s)
+             AND (%(platform)s::text IS NULL OR split_part(g.source_key, ':', 1) = %(platform)s)
            ORDER BY g.played_at DESC NULLS LAST, e.game_id DESC, e.ply
            LIMIT %(limit)s OFFSET %(offset)s""",
         {"type": type, "color": color, "player": player, "since": since, "until": until,
-         "game_id": game_id, "limit": limit, "offset": offset},
+         "game_id": game_id, "limit": limit, "offset": offset, "platform": platform, "against": against},
     ).fetchall()
 
 
@@ -414,6 +423,22 @@ def underpromotion_moves(conn: psycopg.Connection) -> list[tuple[int, int, str]]
     return [(r["game_id"], r["ply"], r["uci"]) for r in rows]
 
 
+def position_depths(conn: psycopg.Connection, config_id: int, positions: list[tuple[int, int]]) -> dict:
+    """(game_id, position) -> the depth the config's normal analysis reached there."""
+    if not positions:
+        return {}
+    rows = conn.execute(
+        """SELECT p.game_id, p.position, p.depth FROM unnest(%s::bigint[], %s::int[]) AS k(game_id, position)
+           JOIN engine_positions p ON p.config_id = %s AND p.game_id = k.game_id AND p.position = k.position""",
+        ([g for g, _ in positions], [p for _, p in positions], config_id),
+    ).fetchall()
+    return {(r["game_id"], r["position"]): r["depth"] for r in rows if r["depth"]}
+
+
+def delete_probes(conn: psycopg.Connection, config_id: int, kinds: tuple[str, ...]) -> None:
+    conn.execute("DELETE FROM engine_move_probes WHERE config_id = %s AND kind = ANY(%s)", (config_id, list(kinds)))
+
+
 def probe_keys(conn: psycopg.Connection, config_id: int) -> set[tuple[int, int, str]]:
     rows = conn.execute("SELECT game_id, position, kind FROM engine_move_probes WHERE config_id = %s", (config_id,))
     return {(r["game_id"], r["position"], r["kind"]) for r in rows}
@@ -457,13 +482,16 @@ def engine_facts_for_moves(conn: psycopg.Connection, config_id: int, moves: list
     if not moves:
         return {}
     rows = conn.execute(
-        """SELECT k.game_id, k.ply, m.uci, m.color,
+        """SELECT k.game_id, k.ply, m.uci, m.color, g.chess960,
+                  coalesce(prev.fen_after, g.initial_fen) AS fen_before,   -- NULL = standard start
                   b.score_cp AS before_cp, b.mate AS before_mate, b.best_uci, b.multipv,
                   a.score_cp AS after_cp, a.mate AS after_mate,
                   q.results AS vs_queen, q.budget AS vs_queen_budget,
                   x.results AS all_moves, x.moves AS all_moves_list, x.budget AS all_moves_budget
            FROM unnest(%(games)s::bigint[], %(plies)s::int[]) AS k(game_id, ply)
            JOIN moves m ON m.game_id = k.game_id AND m.ply = k.ply
+           JOIN games g ON g.id = k.game_id
+           LEFT JOIN moves prev ON prev.game_id = k.game_id AND prev.ply = k.ply - 1
            JOIN engine_positions b ON b.config_id = %(config)s AND b.game_id = k.game_id AND b.position = k.ply - 1
            LEFT JOIN engine_positions a ON a.config_id = %(config)s AND a.game_id = k.game_id AND a.position = k.ply
            LEFT JOIN engine_move_probes q ON q.config_id = %(config)s AND q.game_id = k.game_id
@@ -506,7 +534,7 @@ def _line(scale: str, line: str, color: str) -> str:
 
 def engine_label_rows(conn: psycopg.Connection, label: str, config_id: int, blunder: float, winning: float,
                       not_winning: float, player: str | None, limit: int, scale: str = "lichess",
-                      include_recaptures: bool = False) -> list[dict]:
+                      include_recaptures: bool = False, platform: str | None = None) -> list[dict]:
     first, second = _line(scale, "p.results->0", "mv.color"), _line(scale, "p.results->1", "mv.color")
     extra_join, extra_cols = "", ""
     if label == "BLUNDER":
@@ -521,12 +549,14 @@ def engine_label_rows(conn: psycopg.Connection, label: str, config_id: int, blun
         where = f"""jsonb_array_length(p.results) >= 2 AND mv.uci = p.results->0->>'uci'
                     AND {first} >= %(winning)s AND {second} <= %(not_winning)s
                     AND (%(include_recaptures)s OR NOT mv.is_recapture)"""
-        order = f"{first} - {second} DESC, mv.is_capture, mv.is_check"  # quiet moves first among equals
+        # quiet moves first: a found quiet only-move is the rare, impressive kind; mates and captures after
+        order = f"mv.is_capture OR mv.is_check, {first} - {second} DESC"
     else:
         raise ValueError(f"unknown label {label!r}")
     return conn.execute(
         f"""WITH mv AS (
               SELECT m.game_id, m.ply, m.color, m.san, m.uci, b.best_uci AS engine_choice,
+                     m.fen_after, prev.fen_after AS fen_before,
                      m.captured IS NOT NULL AS is_capture, m.is_check,
                      -- takes back on the square the opponent just captured on: an "only move" nobody misses
                      (m.captured IS NOT NULL AND prev.captured IS NOT NULL
@@ -543,15 +573,18 @@ def engine_label_rows(conn: psycopg.Connection, label: str, config_id: int, blun
                    mv.engine_choice, mv.is_capture, mv.is_check, mv.is_recapture,
                    round(mv.before, 3) AS expected_before, round(mv.after, 3) AS expected_after,
                    round(mv.before - mv.after, 3) AS expected_drop {extra_cols},
+                   mv.fen_before, mv.fen_after, g.initial_fen,
                    g.played_at, g.white, g.black, g.result, g.source, g.external_id
             FROM mv JOIN games g ON g.id = mv.game_id {extra_join}
             WHERE (%(player)s::text IS NULL
                    OR lower(CASE mv.color WHEN 'w' THEN g.white ELSE g.black END) = lower(%(player)s))
+              AND (%(platform)s::text IS NULL OR split_part(g.source_key, ':', 1) = %(platform)s)
               AND {where}
             ORDER BY {order}
             LIMIT %(limit)s""",
         {"label": label, "scale": scale, "config": config_id, "blunder": blunder, "winning": winning,
-         "not_winning": not_winning, "player": player, "limit": limit, "include_recaptures": include_recaptures},
+         "not_winning": not_winning, "player": player, "limit": limit, "include_recaptures": include_recaptures,
+         "platform": platform},
     ).fetchall()
 
 
@@ -577,3 +610,59 @@ def only_winning_move_candidates(conn: psycopg.Connection, config_id: int, winni
         {"config": config_id, "winning": winning, "player": player},
     ).fetchall()
     return [(r["game_id"], r["position"]) for r in rows]
+
+
+# --- player pages (web) ----------------------------------------------------------------------------
+
+def player_summary(conn: psycopg.Connection, platform: str, username: str) -> dict:
+    """Everything a player page needs in one round of queries. Motif counts are split by who played the
+    move: the player (`mine`) or their opponents (`against`)."""
+    params = {"platform": platform, "user": username}
+    mine = """split_part(g.source_key, ':', 1) = %(platform)s
+              AND (lower(g.white) = lower(%(user)s) OR lower(g.black) = lower(%(user)s))"""
+    totals = conn.execute(
+        f"""WITH g AS (SELECT g.*, CASE WHEN lower(g.white) = lower(%(user)s) THEN 'w' ELSE 'b' END AS me
+                       FROM games g WHERE {mine})
+            SELECT count(*) AS games, coalesce(sum(ply_count + 1), 0) AS positions,
+                   min(played_at) AS first_game, max(played_at) AS last_game,
+                   count(*) FILTER (WHERE (me = 'w' AND result = '1-0') OR (me = 'b' AND result = '0-1')) AS wins,
+                   count(*) FILTER (WHERE result = '1/2-1/2') AS draws,
+                   count(*) FILTER (WHERE (me = 'w' AND result = '0-1') OR (me = 'b' AND result = '1-0')) AS losses,
+                   (SELECT CASE WHEN me = 'w' THEN white_rating ELSE black_rating END
+                    FROM g ORDER BY played_at DESC NULLS LAST LIMIT 1) AS rating,
+                   (SELECT CASE WHEN me = 'w' THEN white ELSE black END
+                    FROM g ORDER BY played_at DESC NULLS LAST LIMIT 1) AS display_name
+            FROM g""",
+        params,
+    ).fetchone()
+    motifs = conn.execute(
+        f"""SELECT e.type,
+                   count(*) FILTER (WHERE lower(CASE e.color WHEN 'w' THEN g.white ELSE g.black END) = lower(%(user)s)) AS mine,
+                   count(*) FILTER (WHERE lower(CASE e.color WHEN 'w' THEN g.white ELSE g.black END) <> lower(%(user)s)) AS against
+            FROM events e JOIN games g ON g.id = e.game_id WHERE {mine}
+            GROUP BY e.type ORDER BY e.type""",
+        params,
+    ).fetchall()
+    config = default_engine_config(conn)
+    engine = None
+    if config:
+        engine = conn.execute(
+            f"""SELECT count(s.game_id) AS games_analyzed, coalesce(sum(s.positions), 0) AS positions_analyzed
+                FROM games g LEFT JOIN engine_game_status s ON s.game_id = g.id AND s.config_id = %(config)s
+                WHERE {mine}""",
+            {**params, "config": config["id"]},
+        ).fetchone() | {"config": {k: config[k] for k in ("id", "engine_name", "limit_kind", "limit_value")}}
+    latest_import = conn.execute(
+        "SELECT * FROM imports WHERE source = %s AND source_ref = %s ORDER BY id DESC LIMIT 1",
+        (platform, username.lower()),
+    ).fetchone()
+    return {"platform": platform, "username": username.lower(), **totals, "motifs": motifs, "engine": engine,
+            "latest_import": latest_import}
+
+
+def game_engine_positions(conn: psycopg.Connection, game_id: int, config_id: int) -> list[dict]:
+    return conn.execute(
+        """SELECT position, score_cp, mate, wdl, best_uci, depth FROM engine_positions
+           WHERE config_id = %s AND game_id = %s ORDER BY position""",
+        (config_id, game_id),
+    ).fetchall()

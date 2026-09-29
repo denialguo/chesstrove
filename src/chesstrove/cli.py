@@ -77,10 +77,14 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--include-recaptures", action="store_true", help="ONLY_WINNING_MOVE: keep obvious recaptures")
     p.add_argument("--limit", type=int, default=20)
     p = esub.add_parser("verify-underpromotions", help="re-ask both underpromotion questions at a stronger setting")
-    p.add_argument("--nodes", type=int, default=1_000_000, help="nodes per move (default 1,000,000)")
+    strength = p.add_mutually_exclusive_group()
+    strength.add_argument("--depth", type=int, default=22, help="search depth for every line (default 22)")
+    strength.add_argument("--nodes", type=int, help="recompute a full-history node config's own probes")
+    p.add_argument("--refresh", action="store_true", help="recompute probes that already exist")
     p.add_argument("--workers", type=int, default=engine.default_workers())
     p.add_argument("--stockfish")
     p = esub.add_parser("verify-only-moves", help="two-line searches where ONLY_WINNING_MOVE can apply (resumable)")
+    p.add_argument("--refresh", action="store_true", help="recompute probes that already exist")
     p.add_argument("--player", help="only this username's moves (fewer candidates)")
     p.add_argument("--config", type=int)
     p.add_argument("--winning", type=float, default=labels.Thresholds().winning)
@@ -144,8 +148,10 @@ def main(argv: list[str] | None = None) -> int:
                     return 0
                 if args.engine_command == "verify-underpromotions":
                     try:
-                        _print(engine.verify_underpromotions(conn, engine.EngineSettings(limit_value=args.nodes),
-                                                             args.stockfish, args.workers))
+                        settings = (engine.EngineSettings(limit_value=args.nodes) if args.nodes
+                                    else engine.EngineSettings(limit_kind="depth", limit_value=args.depth))
+                        _print(engine.verify_underpromotions(conn, settings, args.stockfish, args.workers,
+                                                             refresh=args.refresh))
                     except FileNotFoundError as e:
                         print(e, file=sys.stderr)
                         return 1
@@ -155,7 +161,8 @@ def main(argv: list[str] | None = None) -> int:
                         print(f"\r{p['done']:,}/{p['total']:,} positions", end="", file=sys.stderr, flush=True)
                     try:
                         result = engine.verify_only_winning_moves(conn, args.config, args.winning, args.player,
-                                                                  args.stockfish, args.workers, show)
+                                                                  args.stockfish, args.workers, show,
+                                                                  refresh=args.refresh)
                     except (ValueError, FileNotFoundError) as e:
                         print(e, file=sys.stderr)
                         return 1

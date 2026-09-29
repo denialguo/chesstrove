@@ -36,7 +36,7 @@ class ScriptedEngine:
     def analyse(self, board, limit, multipv, game, info, root_moves=None):
         position = len(board.move_stack)
         line = lambda uci, cp, wdl: {"score": chess.engine.PovScore(chess.engine.Cp(cp), chess.WHITE),  # noqa: E731
-                                     "pv": [chess.Move.from_uci(uci)],
+                                     "pv": [chess.Move.from_uci(uci)], "depth": 12,
                                      "wdl": chess.engine.PovWdl(chess.engine.Wdl(*wdl), chess.WHITE)}
         if multipv == 2 and root_moves is None:
             self.top_two_calls += 1
@@ -131,16 +131,16 @@ def test_deeper_underpromotion_verification_sits_next_to_the_base_verdict(conn):
     under = '[White "a"]\n[Black "b"]\n[Result "*"]\n[SetUp "1"]\n[FEN "8/P1k5/8/8/8/8/8/4K3 w - - 0 1"]\n\n1. a8=N+ *\n'
     import_pgn(conn, under, "g.pgn")
     engine.run(conn, TINY, engine_factory=lambda: ScriptedEngine(moves=["a7a8n"]))
-    result = engine.verify_underpromotions(conn, EngineSettings(limit_value=50_000),
-                                           engine_factory=lambda: ScriptedEngine(moves=["a7a8n"]))
-    assert (result["probes"], result["nodes"]) == (2, 50_000)
-    assert engine.verify_underpromotions(conn, EngineSettings(limit_value=50_000),
-                                         engine_factory=ScriptedEngine)["probes"] == 0  # resumable
+    deep = EngineSettings(limit_kind="depth", limit_value=18)
+    result = engine.verify_underpromotions(conn, deep, engine_factory=lambda: ScriptedEngine(moves=["a7a8n"]))
+    assert (result["probes"], result["depth"]) == (2, 18)
+    assert engine.verify_underpromotions(conn, deep, engine_factory=ScriptedEngine)["probes"] == 0  # resumable
     [e] = insights.annotate(conn, db.list_events(conn, type="UNDERPROMOTION"))
     a = e["engine_analysis"]
     assert a["config"]["nodes"] == 1_000  # the base verdict stays the full-history config's
     [deep] = a["deeper_verification"]
-    assert deep["config"]["nodes"] == 50_000 and deep["all_moves"]["budget"] == {"nodes": 50_000 * 9}
+    assert deep["config"]["depth"] == 18 and deep["all_moves"]["budget"] == {"depth": 18}
+    assert a["all_moves"]["budget"] == {"depth": 12}  # base probes: the depth the normal analysis reached
     assert (deep["tied_for_best_move"], deep["better_than_queen"]) == (True, False)  # every move scored 0
     assert [c["limit_value"] for c in db.status_summary(conn, {})["engine"]] == [1_000]  # probe-only config hidden
 
@@ -152,7 +152,7 @@ def test_api(analyzed, dsn, monkeypatch):
 
     monkeypatch.setenv("CHESSTROVE_DATABASE_URL", dsn)
     client = TestClient(api.app)
-    assert [r["ply"] for r in client.get("/engine-labels", params={"type": "BLUNDER"}).json()] == [3]
-    assert len(client.get("/engine-labels", params={"type": "BLUNDER", "blunder": 0.25}).json()) == 2
-    assert client.get("/engine-labels", params={"type": "BLUNDER", "scale": "stockfish"}).json()[0]["scale"] == "stockfish"
-    assert client.get("/engine-labels", params={"type": "NOPE"}).status_code == 422
+    assert [r["ply"] for r in client.get("/api/engine-labels", params={"type": "BLUNDER"}).json()] == [3]
+    assert len(client.get("/api/engine-labels", params={"type": "BLUNDER", "blunder": 0.25}).json()) == 2
+    assert client.get("/api/engine-labels", params={"type": "BLUNDER", "scale": "stockfish"}).json()[0]["scale"] == "stockfish"
+    assert client.get("/api/engine-labels", params={"type": "NOPE"}).status_code == 422
