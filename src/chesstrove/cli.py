@@ -1,10 +1,13 @@
-"""Minimal CLI. Database from $CHESSTROVE_DATABASE_URL (default postgresql:///chesstrove)."""
+"""Minimal CLI. Database: $CHESSTROVE_DATABASE_URL if set, else a built-in Postgres in ~/.chesstrove."""
 
 import argparse
 import json
+import os
 import sys
 from datetime import date
 from pathlib import Path
+
+import psycopg
 
 from chesstrove import db
 from chesstrove.analysis import reanalyze
@@ -48,7 +51,14 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--all", action="store_true", help="redo every game, not just stale ones")
     args = parser.parse_args(argv)
 
-    with db.connect() as conn:
+    try:
+        conn = db.connect()
+    except psycopg.OperationalError as e:
+        hint = ("\n(it comes from $CHESSTROVE_DATABASE_URL; unset it to use the built-in database)"
+                if os.environ.get("CHESSTROVE_DATABASE_URL") else "")
+        print(f"can't connect to the database: {e}{hint}", file=sys.stderr)
+        return 1
+    with conn:
         db.init_schema(conn)
         match args.command:
             case "init-db":

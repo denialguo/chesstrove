@@ -46,6 +46,7 @@ source = { editable = "." }
 dependencies = [
     { name = "chess" },
     { name = "fastapi" },
+    { name = "pgserver" },
     { name = "psycopg", extra = ["binary"] },
     { name = "uvicorn" },
 ]
@@ -53,7 +54,6 @@ dependencies = [
 [package.dev-dependencies]
 dev = [
     { name = "httpx2" },
-    { name = "pgserver" },
     { name = "pytest" },
 ]
 
@@ -61,6 +61,7 @@ dev = [
 requires-dist = [
     { name = "chess", specifier = ">=1.11.2" },
     { name = "fastapi", specifier = ">=0.141.1" },
+    { name = "pgserver", specifier = ">=0.1.4" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.3.6" },
     { name = "uvicorn", specifier = ">=0.54.0" },
 ]
@@ -68,7 +69,6 @@ requires-dist = [
 [package.metadata.requires-dev]
 dev = [
     { name = "httpx2", specifier = ">=2.13.1" },
-    { name = "pgserver", specifier = ">=0.1.4" },
     { name = "pytest", specifier = ">=9.1.1" },
 ]
 

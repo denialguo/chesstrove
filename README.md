@@ -5,8 +5,8 @@ searched deterministically. Design: [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ```sh
 uv sync
-export CHESSTROVE_DATABASE_URL=postgresql:///chesstrove   # any Postgres 14+
-uv run chesstrove init-db
+# No database setup: data goes to a built-in Postgres in ~/.chesstrove.
+# To use your own server instead: export CHESSTROVE_DATABASE_URL=postgresql://...
 uv run chesstrove import-pgn my_games.pgn   # re-running is safe: duplicates are skipped
 uv run chesstrove import-chesscom myname   # first run fetches everything; later runs only new months
 uv run chesstrove import-lichess myname    # same idea; export LICHESS_TOKEN=... to stream faster

@@ -4,7 +4,9 @@ import os
 from collections.abc import Iterable
 from dataclasses import fields
 from datetime import date
+from functools import cache
 from importlib.resources import files
+from pathlib import Path
 from typing import Any
 
 import psycopg
@@ -22,10 +24,23 @@ MOVE_COLUMNS = (
 
 
 def connect(dsn: str | None = None) -> psycopg.Connection[dict[str, Any]]:
-    """Autocommit connection; callers group work with `with conn.transaction():`."""
-    dsn = dsn or os.environ.get("CHESSTROVE_DATABASE_URL", "postgresql:///chesstrove")
+    """Autocommit connection; callers group work with `with conn.transaction():`.
+
+    Uses $CHESSTROVE_DATABASE_URL when set, otherwise a zero-setup embedded Postgres whose data lives in
+    ~/.chesstrove/pgdata (or $CHESSTROVE_HOME/pgdata) and persists between runs.
+    """
+    dsn = dsn or os.environ.get("CHESSTROVE_DATABASE_URL") or embedded_dsn()
     # UTC session so timestamps read back the same regardless of the server's local zone
     return psycopg.connect(dsn, autocommit=True, row_factory=dict_row, options="-c timezone=UTC")
+
+
+@cache
+def embedded_dsn() -> str:
+    import pgserver  # starts (or reuses) a local server; ~1-2 s the first time per process
+
+    data_dir = Path(os.environ.get("CHESSTROVE_HOME", Path.home() / ".chesstrove")) / "pgdata"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    return pgserver.get_server(data_dir, cleanup_mode="stop").get_uri()
 
 
 def init_schema(conn: psycopg.Connection) -> None:
