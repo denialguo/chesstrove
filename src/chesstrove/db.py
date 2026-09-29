@@ -659,7 +659,13 @@ def player_summary(conn: psycopg.Connection, platform: str, username: str) -> di
     motifs = conn.execute(
         f"""SELECT e.type,
                    count(*) FILTER (WHERE lower(CASE e.color WHEN 'w' THEN g.white ELSE g.black END) = lower(%(user)s)) AS mine,
-                   count(*) FILTER (WHERE lower(CASE e.color WHEN 'w' THEN g.white ELSE g.black END) <> lower(%(user)s)) AS against
+                   count(*) FILTER (WHERE lower(CASE e.color WHEN 'w' THEN g.white ELSE g.black END) <> lower(%(user)s)) AS against,
+                   -- named mates only: the player's own, by form (textbook / canonical / variant)
+                   jsonb_strip_nulls(jsonb_build_object(
+                       'textbook', nullif(count(*) FILTER (WHERE e.metadata->>'form' = 'textbook' AND lower(CASE e.color WHEN 'w' THEN g.white ELSE g.black END) = lower(%(user)s)), 0),
+                       'canonical', nullif(count(*) FILTER (WHERE e.metadata->>'form' = 'canonical' AND lower(CASE e.color WHEN 'w' THEN g.white ELSE g.black END) = lower(%(user)s)), 0),
+                       'variant', nullif(count(*) FILTER (WHERE e.metadata->>'form' = 'variant' AND lower(CASE e.color WHEN 'w' THEN g.white ELSE g.black END) = lower(%(user)s)), 0)
+                   )) AS forms
             FROM events e JOIN games g ON g.id = e.game_id WHERE {mine}
             GROUP BY e.type ORDER BY e.type""",
         params,

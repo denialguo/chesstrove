@@ -299,6 +299,10 @@ button.plunger:hover { background: var(--brass-hi); }
 .specimen:hover .board { transform: translateY(-2px); box-shadow: 0 0 0 2px var(--brass), 0 12px 20px -10px rgb(0 0 0 / 0.6); }
 .specimen__move { font-family: var(--mono); font-weight: 600; font-size: 0.85rem; }
 .specimen__meta { font-size: 0.8rem; color: var(--on-walnut-3); margin-top: -0.2rem; }
+.specimen__form { font-size: 0.78rem; line-height: 1.35; color: var(--on-walnut-2); }
+.form-tag { font-family: var(--mono); font-size: 0.68rem; letter-spacing: 0.04em; text-transform: uppercase; padding: 0.05rem 0.35rem; border-radius: 3px; border: 1px solid var(--walnut-edge); color: var(--on-walnut-2); }
+.form-tag--textbook { border-color: var(--brass); color: var(--brass-hi); }
+.ledger__forms { font-size: 0.8rem; color: var(--on-walnut-3); }
 
 
 .textlink {

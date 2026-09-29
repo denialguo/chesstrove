@@ -6,9 +6,9 @@ import { Dial } from "../components/Dial";
 import { Digits } from "../components/Digits";
 import { RecordBook } from "../components/RecordBook";
 import { TopBar } from "../components/TopBar";
-import { api, ApiError, PLATFORM_NAME, type EventRow, type Platform, type PlayerSummary } from "../lib/api";
+import { api, type Motif, ApiError, PLATFORM_NAME, type EventRow, type Platform, type PlayerSummary } from "../lib/api";
 import { formatDate, formatMonth, moveLabel, n, plural } from "../lib/format";
-import { MOTIFS, NAMED_MATES, type MotifInfo } from "../lib/motifs";
+import { FORM_NAME, MOTIFS, NAMED_MATES, formNote, type MateForm, type MotifInfo } from "../lib/motifs";
 
 const POLL_MS = 2000;
 
@@ -145,11 +145,11 @@ export function Player() {
         <section className="ledger ledger--named" aria-labelledby="named-title">
           <div className="section-head">
             <h3 id="named-title">Named mates</h3>
-            <p>The textbook patterns, by their classic geometry. {plural(NAMED_MATES.length - namedFound.length, "other")} haven’t turned up yet.</p>
+            <p>By their geometry, with how closely each matches the classic diagram. {plural(NAMED_MATES.length - namedFound.length, "other")} haven’t turned up yet.</p>
           </div>
           <ul className="ledger__rows">
             {namedFound.map(({ m, counts }) => (
-              <MotifRow key={m.type} motif={m} mine={counts.mine} against={counts.against} platform={platform} username={username} name={name} />
+              <MotifRow key={m.type} motif={m} mine={counts.mine} against={counts.against} forms={counts.forms} platform={platform} username={username} name={name} />
             ))}
           </ul>
         </section>
@@ -175,9 +175,11 @@ function Shell({ children }: { children: React.ReactNode }) {
   );
 }
 
-function MotifRow({ motif, mine, against, platform, username, name }: {
-  motif: MotifInfo; mine: number; against: number; platform: Platform; username: string; name: string;
+function MotifRow({ motif, mine, against, forms, platform, username, name }: {
+  motif: MotifInfo; mine: number; against: number; forms?: Motif["forms"]; platform: Platform; username: string; name: string;
 }) {
+  const breakdown = forms && (["textbook", "canonical", "variant"] as MateForm[])
+    .filter((f) => forms[f]).map((f) => `${forms[f]} ${FORM_NAME[f].toLowerCase()}`).join(" · ");
   const [open, setOpen] = useState(false);
   const [side, setSide] = useState<"mine" | "against">(mine > 0 || against === 0 ? "mine" : "against");
   const empty = mine === 0 && against === 0;
@@ -191,6 +193,7 @@ function MotifRow({ motif, mine, against, platform, username, name }: {
           <span className="glyph">{motif.glyph}</span>
           <span className="ledger__text">
             <span className="ledger__name">{motif.name}</span>
+            {breakdown && <span className="ledger__forms">{breakdown}</span>}
             <span className="ledger__def">{empty ? "Not in these games yet." : motif.definition}</span>
           </span>
         </span>
@@ -222,6 +225,7 @@ function Specimens({ platform, username, type, side }: { platform: Platform; use
       {rows.map((r) => {
         const playerIsWhite = r.white.toLowerCase() === username.toLowerCase();
         const opponent = playerIsWhite ? r.black : r.white;
+        const form = formNote(r.metadata);
         return (
           <li key={r.id}>
             <Link to={`/g/${r.game_id}?ply=${r.ply}${playerIsWhite ? "" : "&o=black"}`} className="specimen">
@@ -229,6 +233,11 @@ function Specimens({ platform, username, type, side }: { platform: Platform; use
                 check={r.san.includes("+") || r.san.includes("#")} label={`${moveLabel(r.ply, r.san, r.color)} against ${opponent}`} />
               <span className="specimen__move">{moveLabel(r.ply, r.san, r.color)}</span>
               <span className="specimen__meta">vs {opponent} · {formatDate(r.played_at)}</span>
+              {form && (
+                <span className="specimen__form">
+                  <span className={`form-tag form-tag--${form.form}`}>{FORM_NAME[form.form]}</span> {form.note}
+                </span>
+              )}
             </Link>
           </li>
         );

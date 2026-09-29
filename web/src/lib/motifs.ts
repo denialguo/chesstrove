@@ -21,23 +21,23 @@ export const MOTIFS: MotifInfo[] = [
 const named = (type: string, name: string, definition: string): MotifInfo => ({ type, glyph: "#", name, definition });
 
 export const NAMED_MATES: MotifInfo[] = [
-  named("EPAULETTE_MATE", "Epaulette mate", "A queen mates head-on; the king's own pieces sit on both its shoulders."),
+  named("EPAULETTE_MATE", "Epaulette mate", "A queen mates head-on; the king's own pieces sit on both its shoulders. Classically two rooks."),
   named("SWALLOWS_TAIL_MATE", "Swallow's tail mate", "A guarded queen mates from right beside the king; its own pieces block the two squares behind it."),
   named("DOVETAIL_MATE", "Dovetail mate", "A queen mates from a diagonal touch; the king's own pieces fill the two squares she can't reach."),
   named("ANASTASIA_MATE", "Anastasia's mate", "A rook or queen mates along the edge; a knight covers the escapes and the king's own piece blocks the way in."),
-  named("ARABIAN_MATE", "Arabian mate", "A rook mates from beside the king, guarded by a knight that covers the last escape."),
+  named("ARABIAN_MATE", "Arabian mate", "A rook mates from beside the king, guarded by a knight that also covers an escape. Classically in the corner."),
   named("BODEN_MATE", "Boden's mate", "Two bishops on crossing diagonals mate a king hemmed in by its own pieces."),
   named("OPERA_MATE", "Opera mate", "A rook mates on the edge beside the king, guarded by a bishop that also takes an escape square."),
   named("ANDERSSEN_MATE", "Anderssen's mate", "A rook or queen mates from the corner, guarded by a pawn that covers another escape."),
   named("LOLLI_MATE", "Lolli's mate", "A pawn-guarded queen mates from directly in front of the king (Qg7#)."),
-  named("DAMIANO_MATE", "Damiano's mate", "A pawn-guarded queen mates from diagonally in front of the king (Qh7#)."),
+  named("DAMIANO_MATE", "Damiano's mate", "A queen mates from the edge square diagonally in front of the king (Qh7# against Kg8), guarded by a pawn or a bishop."),
   named("MORPHY_MATE", "Morphy's mate", "A bishop mates a cornered king down the long diagonal while a rook seals the file."),
   named("GRECO_MATE", "Greco's mate", "A rook or queen mates a cornered king along the edge; a bishop covers the escape."),
   named("HOOK_MATE", "Hook mate", "A rook mates, guarded by a knight, guarded by a pawn."),
   named("CORRIDOR_MATE", "Corridor mate", "A back-rank mate on any other edge: the king's own pieces wall it in."),
   named("BLACKBURNE_MATE", "Blackburne's mate", "Two bishops and a knight do all the work."),
-  named("RETI_MATE", "Réti's mate", "A bishop mates, guarded by a rook or queen down the file; the king's own pieces do the rest."),
-  named("PILLSBURY_MATE", "Pillsbury's mate", "A rook mates straight down the file while a bishop covers the corner."),
+  named("RETI_MATE", "Réti's mate", "A bishop mates from beside a king walled in by its own pieces, guarded by a rook or queen down the line."),
+  named("PILLSBURY_MATE", "Pillsbury's mate", "A rook mates coming straight in while a bishop covers the escape toward the corner."),
   named("LADDER_MATE", "Ladder mate", "Two heavy pieces: one mates along the edge, the other seals the next line in."),
   named("BOX_MATE", "Box mate", "The basic king-and-rook mate."),
 ];
@@ -49,5 +49,37 @@ export const ENGINE_LABELS: LabelInfo[] = [
   { type: "MISSED_WIN", glyph: "?", name: "Missed wins", definition: "A clearly winning position (90%+ win chance) turned into one that wasn't (60% or less).", tone: "bad" },
   { type: "BLUNDER", glyph: "??", name: "Blunders", definition: "A move that cost at least 30 points of win chance.", tone: "bad" },
 ];
+
+// Named mates come in three forms (backend: named_mates.grade). `short_of` names the traits that kept one
+// out of the next form up; these say what differs from the classical picture, not what's wrong.
+export type MateForm = "textbook" | "canonical" | "variant";
+export const FORM_NAME: Record<MateForm, string> = { textbook: "Textbook", canonical: "Canonical", variant: "Variant" };
+const DIFFERS: Record<string, string> = {
+  no_extra_helpers: "other pieces help close the net",
+  both_shoulders_are_rooks: "the shoulder pieces aren't both rooks",
+  king_on_edge: "the king isn't backed against the edge",
+  queen_two_squares_away: "the queen checks from further away",
+  knight_controls_both_characteristic_flights: "the knight covers only one of the two escape squares",
+  king_on_side_file: "it happens on a back rank rather than a side file",
+  king_next_to_corner: "the king isn't next to the corner",
+  king_in_corner: "the king isn't in the corner",
+  king_on_home_rank: "the king isn't on its own back rank",
+  king_near_corner: "the king isn't near a corner",
+  support_is_pawn: "a bishop supports the queen instead of a pawn",
+  checker_is_rook: "a queen mates instead of a rook",
+  checked_down_side_file: "the mate comes along the back rank",
+  four_own_blockers: "fewer of the king's own pieces wall it in",
+  supporter_is_rook: "a queen guards the bishop instead of a rook",
+  bishop_covers_corner: "the bishop covers the square toward the corner, not the corner itself",
+  rook_from_distance: "the rook mates from right beside the king",
+  both_rooks: "one of the two pieces is a queen",
+};
+/** "Variant: the shoulder pieces aren't both rooks." for a named-mate event; null for other events. */
+export function formNote(metadata: Record<string, unknown>): { form: MateForm; note: string } | null {
+  const form = metadata.form as MateForm | undefined;
+  if (!form) return null;
+  const why = ((metadata.short_of as string[] | undefined) ?? []).map((t) => DIFFERS[t] ?? t.replaceAll("_", " "));
+  return { form, note: why.length ? `${why.join("; ")}.`.replace(/^./, (c) => c.toUpperCase()) : "" };
+}
 
 export const motifInfo = (type: string) => [...MOTIFS, ...NAMED_MATES].find((m) => m.type === type);
