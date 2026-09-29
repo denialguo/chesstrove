@@ -6,11 +6,16 @@ config re-run on a game reproduces its results exactly.
 """
 
 import contextlib
+import functools
 import hashlib
+import itertools
+import multiprocessing
 import os
+import queue
 import shutil
+import signal
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -23,7 +28,7 @@ from chesstrove.models import CanonicalGame
 from chesstrove.reconstruction import start_board
 
 PV_MAX = 12  # plies of principal variation kept per position; bounds storage
-FETCH_BATCH = 50
+FETCH_BATCH = 50  # games loaded per query while feeding workers
 INFO = chess.engine.INFO_BASIC | chess.engine.INFO_SCORE | chess.engine.INFO_PV
 
 
@@ -53,6 +58,29 @@ class PositionResult:
     depth: int | None
     seldepth: int | None
     nodes: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class Probe:
+    """A restricted search (UCI `searchmoves`) from `position`, scoring only `moves`, all in one search."""
+
+    position: int
+    moves: tuple[str, ...]
+    results: tuple[dict, ...]  # ranked [{uci, score_cp, mate}], White's POV
+
+
+@dataclass(frozen=True, slots=True)
+class GameAnalysis:
+    game_id: int
+    positions: list[PositionResult]
+    probes: list[Probe]
+    seconds: float
+
+
+@dataclass(frozen=True, slots=True)
+class GameFailure:
+    game_id: int
+    error: str
 
 
 def stockfish_path(explicit: str | None = None) -> str:
@@ -99,6 +127,72 @@ def _analyze_position(engine: Any, settings: EngineSettings, board: chess.Board,
     )
 
 
+def probe_requests(game: CanonicalGame, positions: Sequence[PositionResult]) -> list[tuple[int, tuple[str, ...]]]:
+    """Restricted searches this game needs: each underpromotion vs. queening on the same square, plus the
+    engine's own best move, so all of them are scored by one search and compare fairly."""
+    requests = []
+    for ply, uci in enumerate(game.moves_uci, start=1):
+        if len(uci) == 5 and uci[4] in "nbr":
+            best = positions[ply - 1].best_uci
+            requests.append((ply - 1, tuple(dict.fromkeys([uci, uci[:4] + "q", *([best] if best else [])]))))
+    return requests
+
+
+def run_probe(engine: Any, settings: EngineSettings, game: CanonicalGame, position: int, moves: tuple[str, ...]) -> Probe:
+    board = start_board(game)
+    for uci in game.moves_uci[:position]:
+        board.push_uci(uci)
+    # A fresh game token clears the hash, so probes never influence (or depend on) the position results.
+    infos = engine.analyse(board, settings.limit(), multipv=len(moves), game=object(), info=INFO,
+                           root_moves=[board.parse_uci(m) for m in moves])
+    results = tuple({"uci": i["pv"][0].uci(), "score_cp": i["score"].white().score(), "mate": i["score"].white().mate()}
+                    for i in infos if i.get("pv"))
+    return Probe(position, moves, results)
+
+
+class Analyzer:
+    """One engine and everything needed to turn a game into results. Lives in the parent (1 worker)
+    or once per pool process. Restarts its engine after a failure."""
+
+    def __init__(self, factory: Callable[[], Any], settings: EngineSettings):
+        self.factory, self.settings = factory, settings
+        self.engine = factory()
+
+    def __call__(self, game_id: int, game: CanonicalGame) -> GameAnalysis | GameFailure:
+        t = time.perf_counter()
+        try:
+            positions = analyze_game(self.engine, self.settings, game)
+            probes = [run_probe(self.engine, self.settings, game, p, m) for p, m in probe_requests(game, positions)]
+        except chess.engine.EngineError as e:  # includes the engine process dying
+            self.close()
+            self.engine = self.factory()
+            return GameFailure(game_id, f"{type(e).__name__}: {e}")
+        return GameAnalysis(game_id, positions, probes, time.perf_counter() - t)
+
+    def close(self) -> None:
+        with contextlib.suppress(Exception):  # after Ctrl-C the engine may already be gone
+            self.engine.quit()
+
+
+_worker: Analyzer | None = None  # one per pool process
+
+
+def _init_worker(factory: Callable[[], Any], settings: EngineSettings) -> None:
+    # The parent owns Ctrl-C (it terminates the pool). SIG_IGN is inherited by Stockfish too; it still exits
+    # when its stdin closes, which happens when the pool kills this process.
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    global _worker
+    _worker = Analyzer(factory, settings)
+
+
+def _work(task: tuple[int, CanonicalGame]) -> GameAnalysis | GameFailure:
+    return _worker(*task)
+
+
+def default_workers() -> int:
+    return max(1, (os.cpu_count() or 2) - 1)
+
+
 def run(
     conn: psycopg.Connection,
     settings: EngineSettings = EngineSettings(),
@@ -106,62 +200,95 @@ def run(
     max_games: int | None = None,
     progress: Callable[[dict], None] | None = None,
     engine_factory: Callable[[], Any] | None = None,
+    workers: int = 1,
 ) -> int:
-    """Analyze every game that has no results under this config yet (newest first). Returns the run id.
+    """Analyze every game with no results under this config (newest first) on `workers` engines.
 
-    Each finished game is committed with its status row, so Ctrl-C or a crash loses at most the game in
-    progress, and re-running resumes. A game the engine chokes on is logged, skipped for this run, and
-    retried next run; the engine is restarted.
+    Only this process writes to the database: each finished game is committed with its status row, so
+    Ctrl-C or a crash loses at most the games in flight, and re-running resumes. A game the engine
+    chokes on is logged, skipped for this run, and retried next run. Returns the run id.
     """
     path = None
     if engine_factory is None:
         path = stockfish_path(stockfish)
-        engine_factory = lambda: open_stockfish(path, settings)  # noqa: E731
-    engine = engine_factory()
+        engine_factory = functools.partial(open_stockfish, path, settings)  # picklable, for the pool
+    identify = engine_factory()
     try:
-        config_id = db.ensure_engine_config(conn, engine.id["name"], settings)
-        pending = db.count_pending_engine_games(conn, config_id)
-        total = min(pending, max_games) if max_games is not None else pending
-        run_id = db.start_engine_run(conn, config_id, total, path, _sha256(path) if path else None)
-        done, positions, skip = 0, 0, []
-        started = time.perf_counter()
-        status = "failed"
-        try:
-            while done + len(skip) < total:
-                rows = db.pending_engine_games(conn, config_id, skip, min(FETCH_BATCH, total - done - len(skip)))
-                if not rows:
-                    break
-                for row in rows:
-                    t = time.perf_counter()
-                    try:
-                        results = analyze_game(engine, settings, db.game_from_row(row))
-                    except chess.engine.EngineError as e:  # includes the engine process dying
-                        skip.append(row["id"])
-                        db.record_engine_error(conn, run_id, {"game_id": row["id"], "error": f"{type(e).__name__}: {e}"})
-                        with contextlib.suppress(Exception):
-                            engine.quit()
-                        engine = engine_factory()
-                        continue
-                    with conn.transaction():
-                        db.insert_engine_positions(conn, config_id, row["id"], results)
-                        db.mark_engine_game_done(conn, config_id, row["id"], run_id, len(results))
-                        db.record_engine_progress(conn, run_id, 1, len(results), time.perf_counter() - t)
-                    done += 1
-                    positions += len(results)
-                    if progress:
-                        elapsed = time.perf_counter() - started
-                        progress({"games_done": done, "games_total": total, "positions": positions,
-                                  "elapsed": elapsed, "positions_per_sec": positions / elapsed if elapsed else 0})
-            status = "completed"
-        except KeyboardInterrupt:
-            status = "cancelled"
-            raise
-        finally:
-            db.finish_engine_run(conn, run_id, status)
+        engine_name = identify.id["name"]
     finally:
-        with contextlib.suppress(Exception):  # after Ctrl-C the engine may already be gone
-            engine.quit()
+        with contextlib.suppress(Exception):
+            identify.quit()
+
+    config_id = db.ensure_engine_config(conn, engine_name, settings)
+    game_ids = db.pending_engine_game_ids(conn, config_id, max_games)  # snapshot: in-flight games can't be re-picked
+    run_id = db.start_engine_run(conn, config_id, len(game_ids), workers, path, _sha256(path) if path else None)
+    done = positions = 0
+    started = time.perf_counter()
+    status = "failed"
+    try:
+        for outcome in _outcomes(conn, game_ids, engine_factory, settings, workers):
+            if isinstance(outcome, GameFailure):
+                db.record_engine_error(conn, run_id, {"game_id": outcome.game_id, "error": outcome.error})
+                continue
+            with conn.transaction():
+                db.insert_engine_positions(conn, config_id, outcome.game_id, outcome.positions)
+                db.insert_engine_probes(conn, config_id, outcome.game_id, outcome.probes)
+                db.mark_engine_game_done(conn, config_id, outcome.game_id, run_id, len(outcome.positions))
+                db.record_engine_progress(conn, run_id, 1, len(outcome.positions), outcome.seconds)
+            done += 1
+            positions += len(outcome.positions)
+            if progress:
+                elapsed = time.perf_counter() - started
+                progress({"games_done": done, "games_total": len(game_ids), "positions": positions,
+                          "elapsed": elapsed, "positions_per_sec": positions / elapsed if elapsed else 0})
+        status = "completed"
+    except KeyboardInterrupt:
+        status = "cancelled"
+        raise
+    finally:
+        db.finish_engine_run(conn, run_id, status)
     return run_id
+
+
+def _games(conn: psycopg.Connection, game_ids: list[int]) -> Iterator[tuple[int, CanonicalGame]]:
+    for chunk in itertools.batched(game_ids, FETCH_BATCH):
+        rows = {row["id"]: row for row in db.games_with_moves(conn, list(chunk))}
+        for game_id in chunk:
+            if game_id in rows:  # skip games deleted since the snapshot
+                yield game_id, db.game_from_row(rows[game_id])
+
+
+def _outcomes(conn: psycopg.Connection, game_ids: list[int], factory: Callable[[], Any], settings: EngineSettings,
+              workers: int) -> Iterator[GameAnalysis | GameFailure]:
+    games = _games(conn, game_ids)
+    if workers == 1:
+        analyzer = Analyzer(factory, settings)
+        try:
+            for game_id, game in games:
+                yield analyzer(game_id, game)
+        finally:
+            analyzer.close()
+        return
+
+    finished: queue.Queue = queue.Queue()  # filled by the pool's result thread; only this thread touches the DB
+    with multiprocessing.get_context("spawn").Pool(workers, _init_worker, (factory, settings)) as pool:  # exit = terminate
+        in_flight = 0
+
+        def submit() -> None:
+            nonlocal in_flight
+            if (task := next(games, None)) is not None:
+                pool.apply_async(_work, (task,), callback=finished.put, error_callback=finished.put)
+                in_flight += 1
+
+        for _ in range(2 * workers):  # keep every worker busy without loading every game into memory
+            submit()
+        while in_flight:
+            outcome = finished.get()
+            in_flight -= 1
+            if isinstance(outcome, BaseException):
+                raise outcome  # a bug in the worker, not an engine hiccup: fail the run loudly
+            yield outcome
+            submit()
 
 
 def _sha256(path: str) -> str:

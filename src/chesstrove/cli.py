@@ -9,7 +9,7 @@ from pathlib import Path
 
 import psycopg
 
-from chesstrove import db, engine
+from chesstrove import db, engine, insights
 from chesstrove.analysis import reanalyze
 from chesstrove.detectors import DETECTORS
 from chesstrove.ingest import import_chesscom, import_lichess, import_pgn
@@ -41,6 +41,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--since", type=date.fromisoformat, help="YYYY-MM-DD, inclusive")
     p.add_argument("--until", type=date.fromisoformat, help="YYYY-MM-DD, inclusive")
     p.add_argument("--game", type=int)
+    p.add_argument("--engine", action="store_true", help="attach Stockfish analysis where the game has been analyzed")
+    p.add_argument("--engine-config", type=int, help="which engine config (default: the one covering most games)")
     p.add_argument("--limit", type=int, default=50)
     p.add_argument("--offset", type=int, default=0)
     sub.add_parser("detectors", help="list detectors and their versions")
@@ -59,6 +61,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--multipv", type=int, default=1, help="lines per position (costs roughly proportionally)")
     p.add_argument("--hash", type=int, default=engine.EngineSettings().hash_mb, help="hash MB")
     p.add_argument("--max-games", type=int, help="stop after this many games (e.g. to sample or benchmark)")
+    p.add_argument("--workers", type=int, default=engine.default_workers(),
+                   help="parallel Stockfish processes, 1 thread each (default: CPUs - 1)")
     p.add_argument("--stockfish", help="path to the binary (default: $CHESSTROVE_STOCKFISH, then PATH)")
     esub.add_parser("runs", help="list engine runs")
     args = parser.parse_args(argv)
@@ -95,8 +99,9 @@ def main(argv: list[str] | None = None) -> int:
                 game["events"] = db.list_events(conn, game_id=args.id, limit=10_000)
                 _print(game)
             case "events":
-                _print(db.list_events(conn, args.type, args.color, args.player, args.since, args.until,
-                                      args.game, args.limit, args.offset))
+                found = db.list_events(conn, args.type, args.color, args.player, args.since, args.until,
+                                       args.game, args.limit, args.offset)
+                _print(insights.annotate(conn, found, args.engine_config) if args.engine or args.engine_config else found)
             case "detectors":
                 _print([{"id": d.id, "version": d.version, "definition": (d.__doc__ or "").strip()} for d in DETECTORS])
             case "serve":
@@ -117,7 +122,8 @@ def main(argv: list[str] | None = None) -> int:
                     multipv=args.multipv, hash_mb=args.hash,
                 )
                 try:
-                    run_id = engine.run(conn, settings, args.stockfish, args.max_games, _engine_progress)
+                    run_id = engine.run(conn, settings, args.stockfish, args.max_games, _engine_progress,
+                                        workers=args.workers)
                 except FileNotFoundError as e:
                     print(e, file=sys.stderr)
                     return 1

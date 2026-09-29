@@ -12,7 +12,7 @@ from typing import Annotated, Literal
 from fastapi import BackgroundTasks, Body, Depends, FastAPI, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
-from chesstrove import db, detectors
+from chesstrove import db, detectors, insights
 from chesstrove.analysis import reanalyze
 from chesstrove.ingest import import_chesscom, import_lichess, import_pgn
 
@@ -111,9 +111,13 @@ def list_events(
     game_id: int | None = None,
     limit: Limit = 50,
     offset: Offset = 0,
+    engine: bool = False,
+    engine_config: int | None = None,
 ) -> list[dict]:
-    """`player` = moves played by that username (matched to the event's color). Dates are inclusive."""
-    return db.list_events(c, type, color, player, since, until, game_id, limit, offset)
+    """`player` = moves played by that username (matched to the event's color). Dates are inclusive.
+    `engine=true` attaches Stockfish analysis (default config: the one covering the most games)."""
+    found = db.list_events(c, type, color, player, since, until, game_id, limit, offset)
+    return insights.annotate(c, found, engine_config) if engine or engine_config else found
 
 
 @app.get("/detectors")

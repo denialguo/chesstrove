@@ -309,29 +309,39 @@ def ensure_engine_config(conn: psycopg.Connection, engine_name: str, s: Any) -> 
     ).fetchone()["id"]
 
 
-def count_pending_engine_games(conn: psycopg.Connection, config_id: int) -> int:
-    return conn.execute(f"SELECT count(*) AS n {_PENDING}", {"config": config_id}).fetchone()["n"]
+def pending_engine_game_ids(conn: psycopg.Connection, config_id: int, limit: int | None) -> list[int]:
+    """Games with no results under this config, newest first (recent games get engine insights first).
+    Taken as a snapshot at the start of a run, so games still in flight can't be handed out twice."""
+    rows = conn.execute(
+        f"SELECT g.id {_PENDING} ORDER BY g.played_at DESC NULLS LAST, g.id DESC LIMIT %(limit)s",
+        {"config": config_id, "limit": limit},
+    ).fetchall()
+    return [r["id"] for r in rows]
 
 
-def pending_engine_games(conn: psycopg.Connection, config_id: int, skip: list[int], limit: int) -> list[dict]:
-    """Newest games first, so recent games get engine insights first. Finished games drop out of the
-    pending set on their own, so no cursor is needed; `skip` excludes games that failed this run."""
+def games_with_moves(conn: psycopg.Connection, game_ids: list[int]) -> list[dict]:
     return conn.execute(
-        f"""SELECT g.*, ARRAY(SELECT m.uci FROM moves m WHERE m.game_id = g.id ORDER BY m.ply) AS moves_uci
-            {_PENDING} AND NOT (g.id = ANY(%(skip)s))
-            ORDER BY g.played_at DESC NULLS LAST, g.id DESC
-            LIMIT %(limit)s""",
-        {"config": config_id, "skip": skip, "limit": limit},
+        """SELECT g.*, ARRAY(SELECT m.uci FROM moves m WHERE m.game_id = g.id ORDER BY m.ply) AS moves_uci
+           FROM games g WHERE g.id = ANY(%s)""",
+        (game_ids,),
     ).fetchall()
 
 
-def start_engine_run(conn: psycopg.Connection, config_id: int, games_total: int,
+def start_engine_run(conn: psycopg.Connection, config_id: int, games_total: int, workers: int,
                      binary_path: str | None, binary_sha256: str | None) -> int:
     return conn.execute(
-        """INSERT INTO engine_runs (config_id, games_total, binary_path, binary_sha256)
-           VALUES (%s, %s, %s, %s) RETURNING id""",
-        (config_id, games_total, binary_path, binary_sha256),
+        """INSERT INTO engine_runs (config_id, games_total, workers, binary_path, binary_sha256)
+           VALUES (%s, %s, %s, %s, %s) RETURNING id""",
+        (config_id, games_total, workers, binary_path, binary_sha256),
     ).fetchone()["id"]
+
+
+def insert_engine_probes(conn: psycopg.Connection, config_id: int, game_id: int, probes: list[Any]) -> None:
+    for p in probes:
+        conn.execute(
+            "INSERT INTO engine_move_probes (config_id, game_id, position, moves, results) VALUES (%s, %s, %s, %s, %s)",
+            (config_id, game_id, p.position, list(p.moves), Jsonb(list(p.results))),
+        )
 
 
 def insert_engine_positions(conn: psycopg.Connection, config_id: int, game_id: int, results: list[Any]) -> None:
@@ -392,3 +402,36 @@ def status_summary(conn: psycopg.Connection, detector_versions: dict[str, int]) 
            GROUP BY c.id ORDER BY c.id""",
     ).fetchall()
     return {**totals, "engine": engines}
+
+
+def get_engine_config(conn: psycopg.Connection, config_id: int) -> dict | None:
+    return conn.execute("SELECT * FROM engine_configs WHERE id = %s", (config_id,)).fetchone()
+
+
+def default_engine_config(conn: psycopg.Connection) -> dict | None:
+    """The config that covers the most games (ties: the newest)."""
+    return conn.execute(
+        """SELECT c.* FROM engine_configs c JOIN engine_game_status s ON s.config_id = c.id
+           GROUP BY c.id ORDER BY count(*) DESC, c.id DESC LIMIT 1""",
+    ).fetchone()
+
+
+def engine_facts_for_moves(conn: psycopg.Connection, config_id: int, moves: list[tuple[int, int]]) -> dict:
+    """For each (game_id, ply): the move, the engine's view of the positions before and after it, and any
+    probe searched from before it. Keyed by (game_id, ply); moves without analysis are absent."""
+    if not moves:
+        return {}
+    rows = conn.execute(
+        """SELECT k.game_id, k.ply, m.uci, m.color,
+                  b.score_cp AS before_cp, b.mate AS before_mate, b.best_uci, b.multipv,
+                  a.score_cp AS after_cp, a.mate AS after_mate, p.results AS probe
+           FROM unnest(%(games)s::bigint[], %(plies)s::int[]) AS k(game_id, ply)
+           JOIN moves m ON m.game_id = k.game_id AND m.ply = k.ply
+           JOIN engine_positions b ON b.config_id = %(config)s AND b.game_id = k.game_id AND b.position = k.ply - 1
+           LEFT JOIN engine_positions a ON a.config_id = %(config)s AND a.game_id = k.game_id AND a.position = k.ply
+           LEFT JOIN LATERAL (SELECT results FROM engine_move_probes p
+                              WHERE p.config_id = %(config)s AND p.game_id = k.game_id AND p.position = k.ply - 1
+                                AND m.uci = ANY(p.moves) LIMIT 1) p ON true""",
+        {"games": [g for g, _ in moves], "plies": [p for _, p in moves], "config": config_id},
+    ).fetchall()
+    return {(r["game_id"], r["ply"]): r for r in rows}

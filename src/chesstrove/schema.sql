@@ -182,3 +182,14 @@ CREATE TABLE IF NOT EXISTS engine_positions (
     PRIMARY KEY (config_id, game_id, position),
     CHECK ((score_cp IS NULL) <> (mate IS NULL))
 );
+
+-- Restricted searches (UCI searchmoves) that score a specific set of root moves in ONE search, so they
+-- compare fairly: e.g. an underpromotion vs. queening on the same square vs. the engine's best move.
+CREATE TABLE IF NOT EXISTS engine_move_probes (
+    config_id   bigint NOT NULL REFERENCES engine_configs ON DELETE CASCADE,
+    game_id     bigint NOT NULL REFERENCES games ON DELETE CASCADE,
+    position    int NOT NULL,                 -- searched from here (the position before the move)
+    moves       text[] NOT NULL,              -- the only root moves considered
+    results     jsonb NOT NULL,               -- ranked [{uci, score_cp, mate}], White's POV
+    PRIMARY KEY (config_id, game_id, position, moves)
+);

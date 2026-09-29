@@ -77,12 +77,13 @@ src/chesstrove/
 scripts/benchmark.py
 tests/                 real Postgres (embedded via pgserver, or $CHESSTROVE_TEST_DATABASE_URL)
 
-  engine.py            Layer 2: EngineSettings (config identity), analyze_game(), run() (resumable,
-                       Ctrl-C safe, newest games first). One module until the Phase 7 worker pool splits it.
-scripts/benchmark_engine.py   Stockfish throughput on a real-game sample, in a throwaway database
+  engine.py            Layer 2: EngineSettings (config identity), analyze_game(), probes, Analyzer,
+                       run(): worker pool (spawned processes, one Stockfish each, one game per task),
+                       single DB writer, resumable, Ctrl-C safe, newest games first
+  insights.py          query-time combination: engine_analysis attached to events (`events --engine`)
+scripts/benchmark_engine.py   Stockfish throughput and worker scaling on a real-game sample, in a throwaway DB
 
-planned (Phase 7):
-  engine worker pool   N processes, one Stockfish each, one whole game per task, single DB writer
+planned:
   engine detectors     engine-backed classifications computed from stored evaluations (no Stockfish)
 ```
 
@@ -255,6 +256,19 @@ engine_move_probes (config_id, game_id, position, moves text[],  -- restricted s
 
 ### Engine-backed events
 
+Proposed definitions (to confirm). All from the mover's point of view, using **expected score** =
+(W + D/2) / 1000 from Stockfish's own WDL model. That's scale-robust in a way raw centipawns aren't: +3 → +6
+matters much less than 0 → +3. Mate scores map to 1 or 0.
+
+| Detector | Proposed definition |
+|---|---|
+| `BLUNDER` | Expected score drops by ≥ 0.30 (the conventional blunder band, e.g. Lichess's win-% scale). Metadata: before/after, best move. |
+| `MISSED_WIN` | Before the move the mover was winning (expected ≥ 0.90, or a forced mate); after it they aren't (≤ 0.60). Includes missed forced mates beyond mate-in-1. |
+| `ONLY_WINNING_MOVE` | Needs MultiPV ≥ 2: the best line is winning (≥ 0.90), the second-best isn't (≤ 0.60), and the played move is the best one. Unknowable under MultiPV 1, so such configs don't emit it. |
+
+"Biggest blunders of my career" and "games where I was +5 and lost" are queries (sorting and filtering stored
+evaluations), not detectors.
+
 Classifications like BLUNDER, MISSED_WIN or ONLY_WINNING_MOVE are **engine detectors**. They're
 versioned functions of stored evaluations and never run Stockfish. Their output goes to
 `engine_events (config_id, detector_id, detector_version, game_id, ply, type, color, metadata)`, separate
@@ -278,8 +292,17 @@ stores them separately:
   both moves in one search under the same config, so the comparison is fair. This gives `better_than_queen`
   and `queen_promotion_eval`, and supports statements like "queening here would have thrown away the win".
 
-Probes are queued automatically for every `UNDERPROMOTION` event once its game has been analyzed under a
-config. The combined answer is produced at query time:
+Probes run inside the same per-game task, after the game's positions: one restricted search per
+underpromotion over {played move, queening on the same square, the engine's best move}, each with the hash
+cleared, so the position results are identical whether or not probes ran. `is_best_move` for an underpromotion
+is decided inside that one search: the played move scores at least as well as the engine's own choice.
+
+**Why not just compare against `best_move`:** in the Saavedra-style test position, a 20k-node unrestricted
+search picked `Kd3` (+7.2), while the probe, searching only three moves, found that `g8=R` mates in 2.
+Low-node searches can miss what a focused search finds, so string-comparing against the engine's pick would
+wrongly call the underpromotion "not best".
+
+The combined answer is produced at query time (`chesstrove events --engine`, `GET /events?engine=true`):
 
 ```json
 {"type": "UNDERPROMOTION",
@@ -390,9 +413,10 @@ divides them by however many workers the benchmark shows actually scale.
    `engine_positions`, config identity, a single worker, per-game analysis with move history, rule-scored
    terminal positions, resume, Ctrl-C cancellation, engine-crash recovery, `chesstrove status`,
    `GET /status`, and a benchmark (60 real games at three node limits; the 1k/5k/10k runs come with the pool).
-7. **Full-history engine indexing.** Worker pool plus the worker-count benchmark (1k / 5k / 10k games),
-   incremental analysis of new imports, `engine_move_probes`, underpromotion questions A and B, and
-   engine detectors (missed wins, blunders, only-winning-moves).
+7. **Full-history engine indexing.** *Done:* worker pool (`--workers`) with the worker-count benchmark,
+   incremental analysis of new imports (they're simply pending under each config), `engine_move_probes`,
+   underpromotion questions A and B, and `events --engine`. *Next:* engine detectors (definitions below,
+   to confirm) and the 1k / 5k / 10k-game runs on a real history.
 8. **Queries combining both layers**, as views and `GET` endpoints. For example: underpromotions that were
    best moves, queen promotions that caused stalemate, games with 3 queens that were lost, king-delivered mates
    after an engine mistake, only-winning moves found, biggest blunders, games where I was +5 and lost.
