@@ -31,19 +31,19 @@ src/chesstrove/
   reconstruction.py    replay(): the single place that walks a game's moves
   importers/pgn.py     PGN text -> CanonicalGame; to_canonical() is reused by API importers
   importers/chesscom.py  public API client (stdlib urllib, backoff on 429/5xx) + archive JSON -> CanonicalGame
-  ingest.py            batching, dedupe, per-game failure isolation, import bookkeeping, per-month Chess.com resume
+  importers/lichess.py   NDJSON export stream (oldest first, ongoing included) -> CanonicalGame
+  ingest.py            batching, dedupe, per-game failure isolation, import bookkeeping,
+                       per-month Chess.com resume, timestamp-checkpoint Lichess resume
   analysis.py          analyze() (one replay, all detectors), tracked analysis runs, reanalyze()
   detectors/           base.py (Event, Detector, helpers), one module per family, registry in __init__.py
   db.py                all SQL (plain psycopg 3, no ORM)
   schema.sql           full schema, idempotent
-  cli.py               chesstrove init-db | import-pgn | import-chesscom | imports | games | game |
+  cli.py               chesstrove init-db | import-pgn | import-chesscom | import-lichess | imports | games | game |
                                   events | detectors | reanalyze | serve
   api.py               FastAPI over the same functions; long jobs return 202 + id and run in the background
 scripts/benchmark.py
 tests/                 real Postgres (embedded via pgserver, or $CHESSTROVE_TEST_DATABASE_URL)
 ```
-
-Added in later milestones: `importers/lichess.py`.
 
 The importer "interface" is a convention rather than an ABC: an importer is any iterable of
 `CanonicalGame | ParseFailure`. Chess.com and Lichess both serve PGN, so they fetch, then call
@@ -88,6 +88,10 @@ See [schema.sql](src/chesstrove/schema.sql). Tables: `users`, `chess_accounts`, 
   `imports.resume_state = {"months_done": [...]}` is updated after each past month's games are committed.
   Each import copies the previous state forward, so the latest import for a username holds all of it. The current
   month is always refetched. A month that fails to download is logged in `errors` and retried on the next run.
+  For Lichess, `resume_state = {"since": <ms>}` is saved after each committed batch of the oldest-first stream
+  and becomes the next run's `since`. Ongoing games are requested too, only so the checkpoint can stop before
+  the first one: a game in progress during one import is fetched again (finished) by the next. Both sources
+  read their resume state across all past imports of the account, so a fresh import row never hides progress.
 - **Failure isolation:** a savepoint per game, a transaction per 500 games; failures go to `imports.errors`
   (capped at 1000) with their index in the input. A game that *raises* while being stored (as opposed to a
   deterministic parse failure) keeps its Chess.com month open, so it's retried next run.
@@ -132,11 +136,13 @@ the event's color against `games.white/black`.
 3. **Done: detector framework plus the 8 detectors.** Detectors run inside `store_game` on the same replay.
    Also: `analysis_runs`, per-game version tracking, `reanalyze`, `events` search, and positive /
    near-miss / edge-case fixtures per detector in `tests/detectors/`.
-4. **Done: REST API.** `POST /imports/pgn` (raw PGN body), `POST /imports/chesscom`, `GET /imports[/{id}]`,
+4. **Done: REST API.** `POST /imports/pgn` (raw PGN body), `POST /imports/chesscom`, `POST /imports/lichess`, `GET /imports[/{id}]`,
    `GET /games[/{id}]`, `GET /events?type&color&player&since&until&game_id`, `GET /detectors`,
    `POST /analysis-runs`, `GET /analysis-runs[/{id}]`. Localhost only, no auth. A job whose server dies mid-run
    stays `running`; re-running the import is safe.
-5. **Lichess import,** then profiling on a real 10k+ game history.
+5. **Done: Lichess import.** Streams at Lichess's rate (20 games/s anonymous, 30 with `LICHESS_TOKEN`, 60 for
+   your own games) and waits the requested minute on a 429. Supports standard, Chess960 and From Position;
+   other variants are recorded as failures.
 
 ## Performance
 

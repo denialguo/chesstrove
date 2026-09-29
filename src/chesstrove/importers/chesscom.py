@@ -14,7 +14,7 @@ from collections.abc import Callable, Iterator
 from dataclasses import replace
 from typing import Any
 
-from chesstrove.importers.pgn import ParseFailure, read_pgn
+from chesstrove.importers.pgn import ParseFailure, read_one
 from chesstrove.models import CanonicalGame
 
 ARCHIVES_URL = "https://api.chess.com/pub/player/{}/games/archives"
@@ -57,12 +57,7 @@ def games_in_archive(archive: dict) -> Iterator[CanonicalGame | ParseFailure]:
         if g.get("rules") not in SUPPORTED_RULES:
             yield ParseFailure(f"unsupported variant: {g.get('rules')}", ref)
             continue
-        if not g.get("pgn"):
-            yield ParseFailure("no PGN in API response", ref)
-            continue
-        [item, *extra] = list(read_pgn(g["pgn"], source="chesscom")) or [ParseFailure("empty PGN", ref)]
-        if extra:
-            item = ParseFailure("API returned more than one game in one PGN", ref)
+        item = read_one(g.get("pgn"), "chesscom", ref)
         if isinstance(item, CanonicalGame):
             # The JSON knows things the PGN doesn't.
             item = replace(

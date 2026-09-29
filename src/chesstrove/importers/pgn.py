@@ -45,6 +45,16 @@ def read_pgn(text: str, source: Source = "pgn") -> Iterator[CanonicalGame | Pars
             yield ParseFailure(str(e), raw)
 
 
+def read_one(text: str | None, source: Source, ref: str) -> CanonicalGame | ParseFailure:
+    """Exactly one game from an API response's PGN field; anything else is a ParseFailure naming `ref`."""
+    if not text:
+        return ParseFailure("no PGN in API response", ref)
+    items = list(read_pgn(text, source))
+    if len(items) != 1:
+        return ParseFailure(f"expected one game in API PGN, got {len(items)}", ref)
+    return items[0]
+
+
 def to_canonical(game: chess.pgn.Game, raw: str, source: Source) -> CanonicalGame:
     if game.errors:
         raise ValueError(f"invalid PGN: {game.errors[0]}")

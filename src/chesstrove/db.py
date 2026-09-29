@@ -86,6 +86,16 @@ def chesscom_months_done(conn: psycopg.Connection, username: str) -> set[str]:
     return {r["month"] for r in rows}
 
 
+def lichess_checkpoint(conn: psycopg.Connection, username: str) -> int:
+    """Latest `since` (ms) recorded by any import of this account; 0 = from the beginning."""
+    row = conn.execute(
+        """SELECT coalesce(max((resume_state->>'since')::bigint), 0) AS since
+           FROM imports WHERE source = 'lichess' AND source_ref = %s""",
+        (username,),
+    ).fetchone()
+    return row["since"]
+
+
 def set_import_account(conn: psycopg.Connection, import_id: int, account_id: int) -> None:
     conn.execute("UPDATE imports SET account_id = %s WHERE id = %s", (account_id, import_id))
 

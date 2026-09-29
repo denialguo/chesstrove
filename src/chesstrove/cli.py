@@ -9,7 +9,7 @@ from pathlib import Path
 from chesstrove import db
 from chesstrove.analysis import reanalyze
 from chesstrove.detectors import DETECTORS
-from chesstrove.ingest import import_chesscom, import_pgn
+from chesstrove.ingest import import_chesscom, import_lichess, import_pgn
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -19,6 +19,9 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("import-pgn", help="import one or more PGN files")
     p.add_argument("files", nargs="+", type=Path)
     p = sub.add_parser("import-chesscom", help="import (or catch up) a Chess.com game history")
+    p.add_argument("username")
+    p.add_argument("--user", default="me", help="local ChessTrove user who owns the account")
+    p = sub.add_parser("import-lichess", help="import (or catch up) a Lichess game history; set LICHESS_TOKEN to go faster")
     p.add_argument("username")
     p.add_argument("--user", default="me", help="local ChessTrove user who owns the account")
     sub.add_parser("imports", help="list imports and their status")
@@ -56,6 +59,8 @@ def main(argv: list[str] | None = None) -> int:
                     _print(db.get_import(conn, import_id))
             case "import-chesscom":
                 _print(db.get_import(conn, import_chesscom(conn, args.username, args.user)))
+            case "import-lichess":
+                _print(db.get_import(conn, import_lichess(conn, args.username, args.user)))
             case "imports":
                 _print(db.list_imports(conn))
             case "games":

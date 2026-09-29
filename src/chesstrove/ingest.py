@@ -10,7 +10,7 @@ import psycopg
 
 from chesstrove import db
 from chesstrove.analysis import Run, analyze, tracked_run
-from chesstrove.importers import chesscom
+from chesstrove.importers import chesscom, lichess
 from chesstrove.importers.pgn import ParseFailure, read_pgn
 from chesstrove.models import CanonicalGame
 
@@ -67,6 +67,47 @@ def import_chesscom(
             if month < current_month and not crashed:
                 months_done.add(month)
                 db.set_resume_state(conn, import_id, {"months_done": sorted(months_done)})
+    return import_id
+
+
+def import_lichess(
+    conn: psycopg.Connection,
+    username: str,
+    user: str = "me",
+    open_stream: lichess.OpenStream = lichess.open_ndjson,
+    import_id: int | None = None,
+) -> int:
+    """Import a Lichess history from one oldest-first stream, checkpointing after every committed batch.
+
+    The checkpoint (imports.resume_state.since, ms) is the next run's `since`. It advances past each stored
+    game, but stops before the first game that's still in progress (so that game is fetched again once
+    it's finished) or after a batch in which a game raised (so it's retried).
+    """
+    username = username.lower()
+    account_id = db.ensure_account(conn, user, "lichess", username)
+    since = checkpoint = db.lichess_checkpoint(conn, username)
+    frozen = False  # once set, the checkpoint stays put for the rest of this run
+
+    with tracked_import(conn, "lichess", username, account_id, import_id) as import_id, tracked_run(conn) as run:
+        db.set_resume_state(conn, import_id, {"since": checkpoint})
+        for chunk in itertools.batched(lichess.stream_games(username, since, open_stream), BATCH_SIZE):
+            items = []
+            chunk_checkpoint = checkpoint
+            for game in chunk:
+                if lichess.is_ongoing(game):
+                    if not frozen:
+                        chunk_checkpoint = min(chunk_checkpoint, game["createdAt"])  # games arrive oldest first
+                    frozen = True
+                    continue
+                items.append(lichess.to_item(game))
+                if not frozen:
+                    chunk_checkpoint = game["createdAt"] + 1
+            crashed = store_items(conn, import_id, run, items)
+            if crashed:
+                frozen = True
+            else:
+                checkpoint = chunk_checkpoint
+            db.set_resume_state(conn, import_id, {"since": checkpoint})
     return import_id
 
 

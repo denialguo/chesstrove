@@ -88,3 +88,14 @@ def test_reanalyze(client):
 def test_detectors(client):
     ids = [d["id"] for d in client.get("/detectors").json()]
     assert "MISSED_MATE_IN_ONE" in ids and len(ids) == 8
+
+
+def test_lichess_import(client, monkeypatch):
+    from test_lichess import FakeLichess, lichess_game
+
+    fake = FakeLichess([lichess_game(1, 1000), lichess_game(2, 2000)])
+    monkeypatch.setattr(api, "import_lichess",
+                        lambda c, username, user, import_id: ingest.import_lichess(c, username, user, fake, import_id))
+    import_id = client.post("/imports/lichess", json={"username": "Alice"}).json()["import_id"]
+    imp = client.get(f"/imports/{import_id}").json()
+    assert (imp["status"], imp["source"], imp["games_imported"], imp["resume_state"]) == ("completed", "lichess", 2, {"since": 2001})

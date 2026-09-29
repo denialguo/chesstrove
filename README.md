@@ -1,6 +1,6 @@
 # ChessTrove
 
-Indexes your whole chess history (PGN files and Chess.com now; Lichess next) into Postgres so rare motifs can be
+Indexes your whole chess history (PGN files, Chess.com, Lichess) into Postgres so rare motifs can be
 searched deterministically. Design: [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ```sh
@@ -9,6 +9,7 @@ export CHESSTROVE_DATABASE_URL=postgresql:///chesstrove   # any Postgres 14+
 uv run chesstrove init-db
 uv run chesstrove import-pgn my_games.pgn   # re-running is safe: duplicates are skipped
 uv run chesstrove import-chesscom myname   # first run fetches everything; later runs only new months
+uv run chesstrove import-lichess myname    # same idea; export LICHESS_TOKEN=... to stream faster
 uv run chesstrove imports
 uv run chesstrove games --player myname
 uv run chesstrove game 1                    # moves + events

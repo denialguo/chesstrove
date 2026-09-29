@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 
 from chesstrove import db, detectors
 from chesstrove.analysis import reanalyze
-from chesstrove.ingest import import_chesscom, import_pgn
+from chesstrove.ingest import import_chesscom, import_lichess, import_pgn
 
 log = logging.getLogger(__name__)
 app = FastAPI(title="ChessTrove", description="Search every motif in your chess history.")
@@ -40,7 +40,7 @@ def _found(row: dict | None, what: str) -> dict:
 
 # --- imports ---------------------------------------------------------------------------------------
 
-class ChesscomImport(BaseModel):
+class AccountImport(BaseModel):
     username: str = Field(min_length=1, max_length=50, pattern=r"^[A-Za-z0-9_-]+$")
     user: str = Field("me", min_length=1, max_length=100)
 
@@ -58,10 +58,19 @@ async def create_pgn_import(request: Request, background: BackgroundTasks, c: Co
 
 
 @app.post("/imports/chesscom", status_code=202)
-def create_chesscom_import(body: ChesscomImport, background: BackgroundTasks, c: Conn) -> dict:
+def create_chesscom_import(body: AccountImport, background: BackgroundTasks, c: Conn) -> dict:
+    return _start_account_import(c, background, "chesscom", import_chesscom, body)
+
+
+@app.post("/imports/lichess", status_code=202)
+def create_lichess_import(body: AccountImport, background: BackgroundTasks, c: Conn) -> dict:
+    return _start_account_import(c, background, "lichess", import_lichess, body)
+
+
+def _start_account_import(c, background: BackgroundTasks, source: str, job, body: AccountImport) -> dict:
     username = body.username.lower()
-    import_id = db.start_import(c, "chesscom", username)
-    background.add_task(_in_new_connection, import_chesscom, username, body.user, import_id=import_id)
+    import_id = db.start_import(c, source, username)
+    background.add_task(_in_new_connection, job, username, body.user, import_id=import_id)
     return {"import_id": import_id, "status": "running"}
 
 
