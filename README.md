@@ -1,7 +1,10 @@
 # ChessTrove
 
-Indexes your whole chess history (PGN files, Chess.com, Lichess) into Postgres so rare motifs can be
-searched deterministically. Design: [ARCHITECTURE.md](ARCHITECTURE.md).
+ChessTrove indexes your entire Chess.com/Lichess history (or any PGN) so you can uncover rare motifs, unusual
+positions, engine insights, and recurring patterns across every game you've played.
+
+Today: a deterministic index (move facts + rare-motif detectors). Planned: a persistent, resumable Stockfish
+index over every position. Design and roadmap: [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ```sh
 uv sync
