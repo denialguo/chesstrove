@@ -9,7 +9,7 @@ import { EngineRecordBook } from "../components/EngineRecordBook";
 import { TopBar } from "../components/TopBar";
 import { api, type Motif, ApiError, PLATFORM_NAME, type EventRow, type Platform, type PlayerSummary } from "../lib/api";
 import { formatDate, formatMonth, moveLabel, n, plural, roughDuration } from "../lib/format";
-import { BEST_UNDERPROMOTION, FORM_NAME, MOTIFS, NAMED_MATES, formNote, type MateForm, type MotifInfo } from "../lib/motifs";
+import { BEST_UNDERPROMOTION, COUNTED, FORM_NAME, MOTIFS, NAMED_MATES, formNote, type MateForm, type MotifInfo } from "../lib/motifs";
 import { device, supported } from "../engine/runner";
 
 const AUTO_CHECK_MAX = 25; // underpromotions checked without a click: under ~30 s on one core
@@ -87,7 +87,8 @@ export function Player() {
     );
   }
 
-  // the dials count the collection only: one mate can carry several pattern names
+  // the dials add up the collection's ten motifs, per side of the board: each label on a move counts once (a
+  // promotion mate that underpromotes counts twice). Named mates and engine finds aren't in them.
   const core = summary.motifs.filter((m) => MOTIFS.some((x) => x.type === m.type));
   const mineTotal = core.reduce((sum, m) => sum + m.mine, 0);
   const againstTotal = core.reduce((sum, m) => sum + m.against, 0);
@@ -120,38 +121,26 @@ export function Player() {
           <span className={`plunger ${running ? "plunger--up" : "plunger--down"} plunger--decor`} />
         </div>
         <div className="case__body">
-          <Dial running={running}>
-            <div className="face">
-              {running && expected ? (
-                <>
-                  <Digits value={expected} places={4} className="face__count" />
-                  <span className="face__label">games on {PLATFORM_NAME[platform]}</span>
-                </>
-              ) : running ? (
-                <>
-                  <Digits value={summary.games} places={4} className="face__count" />
-                  <span className="face__label">games in so far</span>
-                </>
-              ) : (
-                <>
-                  <Digits value={mineTotal} className="face__count" />
-                  <span className="face__label">finds by {name}</span>
-                </>
-              )}
-            </div>
-          </Dial>
-          <Dial>
-            <div className="face">
-              <Digits value={againstTotal} className="face__count" />
-              <span className="face__label">finds against {name}</span>
-            </div>
-          </Dial>
+          {running ? (
+            <Tally value={expected ?? summary.games} running
+              unit={expected ? `games on ${PLATFORM_NAME[platform]}` : "games in so far"}
+              who="Importing" examples={null} />
+          ) : (
+            <Tally value={mineTotal} unit="rare moments" who={`by ${name}`} examples={examples(summary.motifs, "mine")} />
+          )}
+          <Tally value={againstTotal} unit="rare moments" who="by their opponents" examples={examples(summary.motifs, "against")} />
         </div>
-        <p className="case__plate" aria-live="polite">
-          {running
-            ? `Importing from ${PLATFORM_NAME[platform]}${expected ? `: ${n(summary.games)} of ${platform === "chesscom" ? "about " : ""}${n(expected)} read so far` : ""}${importLeft ? `, ${importLeft} left` : ""}. Motifs appear as games arrive; you can leave and come back.`
-            : <><span className="num">{n(summary.wins)}</span> wins · <span className="num">{n(summary.draws)}</span> draws · <span className="num">{n(summary.losses)}</span> losses</>}
-        </p>
+        <div className="case__plate" aria-live="polite">
+          <p className="case__explain">
+            Every pattern in the collection below, from smothered mates to missed mates in one, spotted from the moves
+            alone. Named mates are counted separately.
+          </p>
+          <p>
+            {running
+              ? `Importing from ${PLATFORM_NAME[platform]}${expected ? `: ${n(summary.games)} of ${platform === "chesscom" ? "about " : ""}${n(expected)} read so far` : ""}${importLeft ? `, ${importLeft} left` : ""}. Motifs appear as games arrive; you can leave and come back.`
+              : <><span className="num">{n(summary.wins)}</span> wins · <span className="num">{n(summary.draws)}</span> draws · <span className="num">{n(summary.losses)}</span> losses</>}
+          </p>
+        </div>
       </div>
 
       <section className="ledger" aria-labelledby="ledger-title">
@@ -202,6 +191,34 @@ export function Player() {
       ) : null}
     </Shell>
   );
+}
+
+/** One side of the clock: a small dial with the count, and what it's made of beside it. */
+function Tally({ value, unit, who, examples, running }: {
+  value: number; unit: string; who: string; examples: React.ReactNode; running?: boolean;
+}) {
+  return (
+    <div className="tally">
+      <Dial running={running} className="dial--tally">
+        <div className="face"><Digits value={value} className="face__count" /></div>
+      </Dial>
+      <div className="tally__text">
+        <p className="tally__unit">{unit}</p>
+        <p className="tally__who">{who}</p>
+        {examples && <p className="tally__eg">{examples}</p>}
+      </div>
+    </div>
+  );
+}
+
+/** "2 smothered mates · 10 underpromotions · 373 missed mates in one": two of the rarer kinds, then the biggest
+ *  share of the total, so the number is never mostly something the examples leave out. */
+function examples(motifs: Motif[], side: "mine" | "against") {
+  const have = COUNTED.map(([type, one, many]) => ({ count: motifs.find((m) => m.type === type)?.[side] ?? 0, one, many }))
+    .filter((x) => x.count > 0);
+  if (!have.length) return null;
+  const biggest = have.reduce((a, b) => (b.count > a.count ? b : a));
+  return [...have.filter((x) => x !== biggest).slice(0, 2), biggest].map((x, i, all) => <span key={x.one}><span className="nowrap">{plural(x.count, x.one, x.many)}{i < all.length - 1 && " ·"}</span> </span>);
 }
 
 function Shell({ children }: { children: React.ReactNode }) {

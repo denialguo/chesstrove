@@ -16,6 +16,21 @@ export const MOTIFS: MotifInfo[] = [
   { type: "MISSED_MATE_IN_ONE", glyph: "#?", name: "Missed mate in one", definition: "Mate in one was on the board and a different move was played." },
 ];
 
+// How the player-page hero names a count ("2 smothered mates"), in the order it prefers them as examples:
+// recognizable and rare first, the common ones last.
+export const COUNTED: [type: string, one: string, many: string][] = [
+  ["SMOTHERED_MATE", "smothered mate", "smothered mates"],
+  ["UNDERPROMOTION", "underpromotion", "underpromotions"],
+  ["EN_PASSANT_CHECKMATE", "en passant mate", "en passant mates"],
+  ["KING_DELIVERED_MATE", "mate by the king", "mates by the king"],
+  ["PROMOTION_CHECKMATE", "promotion mate", "promotion mates"],
+  ["BACK_RANK_MATE", "back-rank mate", "back-rank mates"],
+  ["THREE_PLUS_QUEENS", "three-queen board", "three-queen boards"],
+  ["DOUBLE_CHECK", "double check", "double checks"],
+  ["DOUBLE_DISAMBIGUATED_SAN", "fully named move", "fully named moves"],
+  ["MISSED_MATE_IN_ONE", "missed mate in one", "missed mates in one"],
+];
+
 // Named mating patterns: secondary to the collection above, shown only once found. One mate can carry
 // several names. Definitions match backend/detectors/named_mates.py.
 const named = (type: string, name: string, definition: string): MotifInfo => ({ type, glyph: "#", name, definition });
