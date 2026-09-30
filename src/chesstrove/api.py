@@ -1,13 +1,19 @@
 """The web app: a REST API under /api (the same functions the CLI uses) and the site itself at /.
-Run: `chesstrove serve` (localhost only, no auth yet).
+Run: `chesstrove serve` (localhost). With CHESSTROVE_PUBLIC=1 (the hosted site) the admin endpoints are
+off and account imports are deduplicated, rate-limited per IP and run a few at a time.
 
 Long jobs (imports, reanalysis) return 202 with the new row's id and run in the background;
 poll GET /api/imports/{id} or GET /api/analysis-runs/{id}.
 """
 
 import logging
+import os
+import threading
+import time
+from collections import defaultdict, deque
 from collections.abc import Iterator
-from datetime import date
+from contextlib import asynccontextmanager
+from datetime import UTC, date, datetime, timedelta
 from typing import Annotated, Literal
 
 from importlib.resources import files
@@ -22,9 +28,31 @@ from chesstrove.analysis import reanalyze
 from chesstrove.ingest import import_chesscom, import_lichess, import_pgn
 
 log = logging.getLogger(__name__)
+PUBLIC = os.environ.get("CHESSTROVE_PUBLIC") == "1"
+IMPORT_SLOTS = threading.BoundedSemaphore(int(os.environ.get("CHESSTROVE_IMPORT_SLOTS", "2")))  # the rest queue
+IMPORTS_PER_IP_HOUR = 10
+FRESH = timedelta(minutes=10)  # a finished import this recent is returned instead of starting another
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    if PUBLIC:  # imports run in this process; any still "running" were cut off by a restart
+        with db.connect() as c:
+            db.fail_running_imports(c, "interrupted by a server restart; visit the page again to resume")
+    yield
+
+
 app = FastAPI(title="ChessTrove", description="Search every motif in your chess history.",
-              docs_url="/api/docs", openapi_url="/api/openapi.json")
+              docs_url="/api/docs", openapi_url="/api/openapi.json", lifespan=lifespan)
 api = APIRouter(prefix="/api")
+
+
+def local_only() -> None:
+    if PUBLIC:
+        raise HTTPException(403, "not available on the public site")
+
+
+LocalOnly = [Depends(local_only)]
 
 Limit = Annotated[int, Query(ge=1, le=1000)]
 Offset = Annotated[int, Query(ge=0)]
@@ -54,7 +82,7 @@ class AccountImport(BaseModel):
     user: str = Field("me", min_length=1, max_length=100)
 
 
-@api.post("/imports/pgn", status_code=202)
+@api.post("/imports/pgn", status_code=202, dependencies=LocalOnly)
 async def create_pgn_import(request: Request, background: BackgroundTasks, c: Conn,
                             name: Annotated[str, Query(max_length=200)] = "upload.pgn") -> dict:
     """Body: raw PGN text (one or many games)."""
@@ -67,23 +95,56 @@ async def create_pgn_import(request: Request, background: BackgroundTasks, c: Co
 
 
 @api.post("/imports/chesscom", status_code=202)
-def create_chesscom_import(body: AccountImport, background: BackgroundTasks, c: Conn) -> dict:
-    return _start_account_import(c, background, "chesscom", import_chesscom, body)
+def create_chesscom_import(body: AccountImport, request: Request, background: BackgroundTasks, c: Conn) -> dict:
+    return _start_account_import(c, request, background, "chesscom", import_chesscom, body)
 
 
 @api.post("/imports/lichess", status_code=202)
-def create_lichess_import(body: AccountImport, background: BackgroundTasks, c: Conn) -> dict:
-    return _start_account_import(c, background, "lichess", import_lichess, body)
+def create_lichess_import(body: AccountImport, request: Request, background: BackgroundTasks, c: Conn) -> dict:
+    return _start_account_import(c, request, background, "lichess", import_lichess, body)
 
 
-def _start_account_import(c, background: BackgroundTasks, source: str, job, body: AccountImport) -> dict:
+_recent_imports: dict[str, deque[float]] = defaultdict(deque)
+_recent_lock = threading.Lock()
+
+
+def _client_ip(request: Request) -> str:
+    forwarded = request.headers.get("x-forwarded-for")  # the host's proxy puts the visitor first
+    return forwarded.split(",")[0].strip() if forwarded else (request.client.host if request.client else "?")
+
+
+def _allow(ip: str) -> bool:
+    """ponytail: in-memory sliding window, per process; fine for one instance, move to the DB if it scales out."""
+    now = time.monotonic()
+    with _recent_lock:
+        q = _recent_imports[ip]
+        while q and q[0] < now - 3600:
+            q.popleft()
+        if len(q) >= IMPORTS_PER_IP_HOUR:
+            return False
+        q.append(now)
+        return True
+
+
+def _start_account_import(c, request: Request, background: BackgroundTasks, source: str, job, body: AccountImport) -> dict:
     username = body.username.lower()
+    latest = db.latest_import(c, source, username)
+    if latest and (latest["status"] == "running" or latest["status"] == "completed"
+                   and latest["finished_at"] > datetime.now(UTC) - FRESH):
+        return {"import_id": latest["id"], "status": latest["status"]}  # one import per account at a time
+    if PUBLIC and not _allow(_client_ip(request)):
+        raise HTTPException(429, "too many imports from here; try again in an hour")
     import_id = db.start_import(c, source, username)
-    background.add_task(_in_new_connection, job, username, body.user, import_id=import_id)
+    background.add_task(_queued, job, username, "me" if PUBLIC else body.user, import_id=import_id)
     return {"import_id": import_id, "status": "running"}
 
 
-@api.get("/imports")
+def _queued(job, *args, **kwargs) -> None:
+    with IMPORT_SLOTS:  # waits while the others finish; the row already says "running"
+        _in_new_connection(job, *args, **kwargs)
+
+
+@api.get("/imports", dependencies=LocalOnly)
 def list_imports(c: Conn) -> list[dict]:
     return db.list_imports(c)
 
@@ -153,7 +214,7 @@ class ReanalyzeRequest(BaseModel):
     all: bool = False  # redo every game, not just stale ones
 
 
-@api.post("/analysis-runs", status_code=202)
+@api.post("/analysis-runs", status_code=202, dependencies=LocalOnly)
 def create_analysis_run(background: BackgroundTasks, c: Conn, body: Annotated[ReanalyzeRequest, Body()] = ReanalyzeRequest()) -> dict:
     try:
         chosen = detectors.select(body.detectors)  # reject unknown ids now, not in the background

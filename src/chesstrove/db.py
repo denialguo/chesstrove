@@ -31,7 +31,9 @@ def connect(dsn: str | None = None) -> psycopg.Connection[dict[str, Any]]:
     """
     dsn = dsn or os.environ.get("CHESSTROVE_DATABASE_URL") or embedded_dsn()
     # UTC session so timestamps read back the same regardless of the server's local zone
-    return psycopg.connect(dsn, autocommit=True, row_factory=dict_row, options="-c timezone=UTC")
+    # prepare_threshold=None: hosted poolers (Supabase's Supavisor, PgBouncer) can't keep prepared statements
+    return psycopg.connect(dsn, autocommit=True, row_factory=dict_row, options="-c timezone=UTC",
+                           prepare_threshold=None)
 
 
 @cache
@@ -126,6 +128,16 @@ def list_imports(conn: psycopg.Connection) -> list[dict]:
 
 def get_import(conn: psycopg.Connection, import_id: int) -> dict | None:
     return conn.execute("SELECT * FROM imports WHERE id = %s", (import_id,)).fetchone()
+
+
+def latest_import(conn: psycopg.Connection, source: str, source_ref: str) -> dict | None:
+    return conn.execute("SELECT * FROM imports WHERE source = %s AND source_ref = %s ORDER BY id DESC LIMIT 1",
+                        (source, source_ref)).fetchone()
+
+
+def fail_running_imports(conn: psycopg.Connection, reason: str) -> None:
+    conn.execute("""UPDATE imports SET status = 'failed', finished_at = now(), errors = errors || %s
+                    WHERE status = 'running'""", (Jsonb([{"error": reason}]),))
 
 
 # --- games & moves -------------------------------------------------------------------------------

@@ -1,11 +1,12 @@
 import io
 import urllib.error
-from datetime import UTC, datetime
+from collections import defaultdict, deque
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
 
-from chesstrove import api, ingest
+from chesstrove import api, db, ingest
 from test_analysis import PGN
 from test_chesscom import ARCHIVES, fake_api
 
@@ -53,12 +54,36 @@ def test_chesscom_import(client, monkeypatch):
     assert (imp["status"], imp["source_ref"], imp["games_imported"]) == ("completed", "alice", 4)
     assert imp["account_id"] is not None
 
-    # a second import through the API resumes from the first one's months
+    # asking again straight away returns the import that just finished instead of starting another
     api_calls = fake_api()
     monkeypatch.setattr(api, "import_chesscom",
                         lambda c, username, user, import_id: ingest.import_chesscom(c, username, user, api_calls, now, import_id))
+    assert client.post("/api/imports/chesscom", json={"username": "alice"}).json()["import_id"] == r.json()["import_id"]
+    assert api_calls.calls == []
+
+    # later, a second import through the API resumes from the first one's months
+    monkeypatch.setattr(api, "FRESH", timedelta(0))
     client.post("/api/imports/chesscom", json={"username": "alice"})
     assert len(api_calls.calls) == 2  # archive list + current month only
+
+
+def test_public_site_locks_admin_endpoints_and_rate_limits_imports(client, monkeypatch):
+    monkeypatch.setattr(api, "PUBLIC", True)
+    monkeypatch.setattr(api, "FRESH", timedelta(0))
+    monkeypatch.setattr(api, "_recent_imports", defaultdict(deque))
+    monkeypatch.setattr(api, "import_chesscom", lambda c, username, user, import_id: db.finish_import(c, import_id, "completed"))
+    assert client.post("/api/imports/pgn", content=b"1. e4 *").status_code == 403
+    assert client.post("/api/analysis-runs", json={}).status_code == 403
+    assert client.get("/api/imports").status_code == 403
+    codes = [client.post("/api/imports/chesscom", json={"username": f"p{i}"}).status_code for i in range(api.IMPORTS_PER_IP_HOUR + 1)]
+    assert codes == [202] * api.IMPORTS_PER_IP_HOUR + [429]
+    # a restart marks imports that were cut off as failed
+    with db.connect() as c:
+        stuck = db.start_import(c, "chesscom", "stuck")
+    with TestClient(api.app):
+        pass
+    with db.connect() as c:
+        assert db.get_import(c, stuck)["status"] == "failed"
 
 
 def test_failed_background_import_reports_why(client, monkeypatch):

@@ -30,3 +30,28 @@ uv run chesstrove status                    # games, positions, deterministic + 
 uv run pytest                              # spins up an embedded Postgres; no setup needed
 uv run scripts/benchmark.py --db
 ```
+
+## Hosting it publicly
+
+The site runs on Render's free web service, with Supabase's free Postgres as the database:
+
+1. **Supabase.** Create a project. Under **Connect**, copy the **Session pooler** connection string (port
+   5432; Render can't reach the direct IPv6 address).
+2. **Copy your local data up** (optional): `scripts/push_db.sh 'postgresql://...'`. This replaces anything
+   ChessTrove already stored there. Without it, run `CHESSTROVE_DATABASE_URL=... uv run chesstrove init-db`
+   once.
+3. **Render.** Go to **New → Blueprint**, pick this repo (it reads `render.yaml`), and paste the connection
+   string as `CHESSTROVE_DATABASE_URL`.
+
+`CHESSTROVE_PUBLIC=1` (set by the blueprint) makes three changes:
+- It turns off PGN upload, reanalysis and the import list.
+- It returns an account's running or just-finished import instead of starting a duplicate.
+- It limits each IP to 10 imports an hour and runs 2 at a time (`CHESSTROVE_IMPORT_SLOTS`).
+
+Stockfish doesn't run on the host: the record book appears only for games analysed locally
+(`chesstrove engine analyze`) before being pushed up.
+
+Free-tier limits:
+- Render sleeps after 15 idle minutes, so the first visit after that takes about a minute to wake it.
+- Supabase pauses a project after a week without traffic, and its database is capped at 500 MB, roughly
+  25k more games beyond the current data.

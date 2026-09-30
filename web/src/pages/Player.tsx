@@ -23,14 +23,25 @@ export function Player() {
     try {
       const s = await api.player(platform, username);
       setSummary(s);
-      const neverImported = s.games === 0 && !s.latest_import;
-      if (neverImported && !importRequested.current) {
+      // fetch new games when there's no import yet, the last one failed, or it finished over a day ago; the
+      // server returns the running (or just-finished) import instead of starting a duplicate
+      const last = s.latest_import;
+      const due = !last || last.status === "failed"
+        || (last.status === "completed" && Date.now() - Date.parse(last.finished_at ?? "") > 86_400_000);
+      if (due && !importRequested.current) {
         importRequested.current = true;
-        await api.startImport(platform, username);
+        try {
+          await api.startImport(platform, username);
+        } catch (e) {
+          if (s.games === 0) throw e; // with games stored, a refused catch-up still leaves a page worth showing
+          return;
+        }
         setSummary(await api.player(platform, username));
       }
     } catch (e) {
-      setError(e instanceof ApiError && e.status === 422 ? "That isn't a valid username." : "ChessTrove's server didn't answer. Try again in a moment.");
+      setError(e instanceof ApiError && e.status === 422 ? "That isn't a valid username."
+        : e instanceof ApiError && e.status === 429 ? "Too many imports from your connection in the last hour. Try again later."
+        : "ChessTrove's server didn't answer. Try again in a moment.");
     }
   }, [platform, username]);
 

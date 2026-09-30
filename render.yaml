@@ -1,0 +1,18 @@
+# Render blueprint: the ChessTrove site on Render's free web service. The database is external
+# (Supabase); set CHESSTROVE_DATABASE_URL to its Session pooler connection string in the dashboard.
+services:
+  - type: web
+    name: chesstrove
+    runtime: python
+    plan: free
+    region: oregon
+    buildCommand: pip install uv && uv sync --frozen --no-dev
+    startCommand: .venv/bin/chesstrove serve --host 0.0.0.0
+    healthCheckPath: /api/detectors
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.8
+      - key: CHESSTROVE_PUBLIC
+        value: "1"
+      - key: CHESSTROVE_DATABASE_URL
+        sync: false
