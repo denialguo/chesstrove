@@ -87,11 +87,9 @@ export function Player() {
     );
   }
 
-  // the dials add up the collection's ten motifs, per side of the board: each label on a move counts once (a
-  // promotion mate that underpromotes counts twice). Named mates and engine finds aren't in them.
-  const core = summary.motifs.filter((m) => MOTIFS.some((x) => x.type === m.type));
-  const mineTotal = core.reduce((sum, m) => sum + m.mine, 0);
-  const againstTotal = core.reduce((sum, m) => sum + m.against, 0);
+  // rare moments: distinct moves per side matching a rare pattern (db.RARE_MOMENT_TYPES), however many labels
+  // they carry. Not missed mates in one (mistakes), not engine finds (not every player has them).
+  const rare = summary.rare_moments;
   const namedFound = NAMED_MATES.flatMap((m) => {
     const counts = summary.motifs.find((x) => x.type === m.type);
     return counts ? [{ m, counts }] : [];
@@ -126,14 +124,16 @@ export function Player() {
               unit={expected ? `games on ${PLATFORM_NAME[platform]}` : "games in so far"}
               who="Importing" examples={null} />
           ) : (
-            <Tally value={mineTotal} unit="rare moments" who={`by ${name}`} examples={examples(summary.motifs, "mine")} />
+            <Tally value={rare.mine} unit={rare.mine === 1 ? "rare moment" : "rare moments"}
+              who={`by ${name}`} examples={examples(rare.types, "mine")} />
           )}
-          <Tally value={againstTotal} unit="rare moments" who="by their opponents" examples={examples(summary.motifs, "against")} />
+          <Tally value={rare.against} unit={rare.against === 1 ? "rare moment" : "rare moments"}
+            who="by their opponents" examples={examples(rare.types, "against")} />
         </div>
         <div className="case__plate" aria-live="polite">
           <p className="case__explain">
-            Every pattern in the collection below, from smothered mates to missed mates in one, spotted from the moves
-            alone. Named mates are counted separately.
+            Unusual moves found directly from the games, no engine: rare and named mates, underpromotions, three-queen
+            boards and more. A move with several labels counts once.
           </p>
           <p>
             {running
@@ -211,10 +211,10 @@ function Tally({ value, unit, who, examples, running }: {
   );
 }
 
-/** "2 smothered mates · 10 underpromotions · 373 missed mates in one": two of the rarer kinds, then the biggest
- *  share of the total, so the number is never mostly something the examples leave out. */
-function examples(motifs: Motif[], side: "mine" | "against") {
-  const have = COUNTED.map(([type, one, many]) => ({ count: motifs.find((m) => m.type === type)?.[side] ?? 0, one, many }))
+/** "2 smothered mates · 10 underpromotions · 54 ladder mates": two of the rarer kinds, then the most common one,
+ *  so the number is never mostly something the examples leave out. */
+function examples(types: PlayerSummary["rare_moments"]["types"], side: "mine" | "against") {
+  const have = COUNTED.map(([type, one, many]) => ({ count: types.find((t) => t.type === type)?.[side] ?? 0, one, many }))
     .filter((x) => x.count > 0);
   if (!have.length) return null;
   const biggest = have.reduce((a, b) => (b.count > a.count ? b : a));

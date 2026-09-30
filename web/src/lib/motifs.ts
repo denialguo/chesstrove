@@ -17,18 +17,26 @@ export const MOTIFS: MotifInfo[] = [
 ];
 
 // How the player-page hero names a count ("2 smothered mates"), in the order it prefers them as examples:
-// recognizable and rare first, the common ones last.
+// the rarest and most recognizable first, named mates among them, the common ones last. Every rare-moment
+// type is here (backend: db.RARE_MOMENT_TYPES); missed mates in one aren't one.
+const m = (type: string, one: string): [string, string, string] => [type, one, one.replace(/mate$/, "mates")];
 export const COUNTED: [type: string, one: string, many: string][] = [
-  ["SMOTHERED_MATE", "smothered mate", "smothered mates"],
-  ["UNDERPROMOTION", "underpromotion", "underpromotions"],
-  ["EN_PASSANT_CHECKMATE", "en passant mate", "en passant mates"],
+  m("SMOTHERED_MATE", "smothered mate"),
+  m("EN_PASSANT_CHECKMATE", "en passant mate"),
   ["KING_DELIVERED_MATE", "mate by the king", "mates by the king"],
-  ["PROMOTION_CHECKMATE", "promotion mate", "promotion mates"],
-  ["BACK_RANK_MATE", "back-rank mate", "back-rank mates"],
+  ["UNDERPROMOTION", "underpromotion", "underpromotions"],
+  m("BODEN_MATE", "Boden's mate"), m("MORPHY_MATE", "Morphy's mate"), m("BLACKBURNE_MATE", "Blackburne's mate"),
+  m("GRECO_MATE", "Greco's mate"), m("ANDERSSEN_MATE", "Anderssen's mate"), m("ANASTASIA_MATE", "Anastasia's mate"),
+  m("ARABIAN_MATE", "Arabian mate"), m("HOOK_MATE", "hook mate"), m("EPAULETTE_MATE", "epaulette mate"),
+  m("SWALLOWS_TAIL_MATE", "swallow's tail mate"), m("DOVETAIL_MATE", "dovetail mate"), m("OPERA_MATE", "opera mate"),
+  m("RETI_MATE", "Réti's mate"), m("PILLSBURY_MATE", "Pillsbury's mate"), m("LOLLI_MATE", "Lolli's mate"),
+  m("DAMIANO_MATE", "Damiano's mate"),
+  m("PROMOTION_CHECKMATE", "promotion mate"),
   ["THREE_PLUS_QUEENS", "three-queen board", "three-queen boards"],
-  ["DOUBLE_CHECK", "double check", "double checks"],
   ["DOUBLE_DISAMBIGUATED_SAN", "fully named move", "fully named moves"],
-  ["MISSED_MATE_IN_ONE", "missed mate in one", "missed mates in one"],
+  m("BACK_RANK_MATE", "back-rank mate"),
+  ["DOUBLE_CHECK", "double check", "double checks"],
+  m("CORRIDOR_MATE", "corridor mate"), m("LADDER_MATE", "ladder mate"), m("BOX_MATE", "box mate"),
 ];
 
 // Named mating patterns: secondary to the collection above, shown only once found. One mate can carry

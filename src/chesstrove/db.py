@@ -13,6 +13,8 @@ import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
+from chesstrove.detectors import DETECTORS
+from chesstrove.detectors.named_mates import NAMED_MATES
 from chesstrove.models import CanonicalGame, MoveFacts
 
 MAX_STORED_ERRORS = 1000
@@ -652,6 +654,13 @@ def only_winning_move_candidates(conn: psycopg.Connection, config_id: int, winni
 
 # --- player pages (web) ----------------------------------------------------------------------------
 
+# A rare moment: one move matching at least one of these, counted once however many labels it carries. Missed mates
+# in one are mistakes, not rare moments; engine labels aren't detectors (and not every player has them).
+RARE_MOMENT_TYPES = [d.id for d in DETECTORS if d.id != "MISSED_MATE_IN_ONE"]
+# Named mates count in these forms only; variants are deliberately loose while they're under review.
+RARE_MOMENT_NAMED_TYPES = [d.id for d in NAMED_MATES]
+RARE_MOMENT_FORMS = ["textbook", "canonical"]
+
 def player_summary(conn: psycopg.Connection, platform: str, username: str) -> dict:
     """Everything a player page needs in one round of queries. Motif counts are split by who played the
     move: the player (`mine`) or their opponents (`against`)."""
@@ -687,6 +696,22 @@ def player_summary(conn: psycopg.Connection, platform: str, username: str) -> di
             GROUP BY e.type ORDER BY e.type""",
         params,
     ).fetchall()
+    # the hero's totals: distinct qualifying moves per side, and the labels on them by type (for its examples)
+    rare = conn.execute(
+        f"""WITH x AS (
+                SELECT e.game_id, e.ply, e.type,
+                       lower(CASE e.color WHEN 'w' THEN g.white ELSE g.black END) = lower(%(user)s) AS mine
+                FROM events e JOIN games g ON g.id = e.game_id
+                WHERE {mine} AND e.type = ANY(%(types)s)
+                  AND (e.type <> ALL(%(named_types)s) OR e.metadata->>'form' = ANY(%(forms)s)))
+            SELECT (SELECT count(DISTINCT (game_id, ply)) FROM x WHERE mine) AS mine,
+                   (SELECT count(DISTINCT (game_id, ply)) FROM x WHERE NOT mine) AS against,
+                   coalesce((SELECT jsonb_agg(t ORDER BY t.type) FROM (
+                       SELECT type, count(*) FILTER (WHERE mine) AS mine, count(*) FILTER (WHERE NOT mine) AS against
+                       FROM x GROUP BY type) t), '[]') AS types""",
+        {**params, "types": RARE_MOMENT_TYPES, "named_types": RARE_MOMENT_NAMED_TYPES,
+         "forms": RARE_MOMENT_FORMS},
+    ).fetchone()
     # the platform's own current rating beats the rating on whichever game happens to be newest so far
     current = conn.execute(
         """SELECT player_rating, rating_mode FROM imports WHERE source = %(platform)s AND source_ref = lower(%(user)s)
@@ -706,8 +731,8 @@ def player_summary(conn: psycopg.Connection, platform: str, username: str) -> di
         "SELECT * FROM imports WHERE source = %s AND source_ref = %s ORDER BY id DESC LIMIT 1",
         (platform, username.lower()),
     ).fetchone()
-    return {"platform": platform, "username": username.lower(), **totals, "motifs": motifs, "engine": engine,
-            "latest_import": latest_import}
+    return {"platform": platform, "username": username.lower(), **totals, "motifs": motifs, "rare_moments": rare,
+            "engine": engine, "latest_import": latest_import}
 
 
 def engine_input(conn: psycopg.Connection, platform: str, username: str) -> list[dict]:

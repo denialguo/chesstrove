@@ -275,6 +275,16 @@ What the inspection found:
 - **Epaulette and Arabian variants.** These are intentionally loose: mid-board kings with pawn shoulders,
   and rook-and-knight mates with up to four helpers. They stay until someone decides to narrow them.
 
+### Rare moments: the player page's headline totals (`db.player_summary`)
+
+A **rare moment** is one move matching at least one rare pattern, counted once however many labels it carries
+(`COUNT(DISTINCT (game_id, ply))`, split by the mover: the player or their opponents; the result doesn't matter).
+Rare patterns are `db.RARE_MOMENT_TYPES`: every detector except `MISSED_MATE_IN_ONE`, which is a mistake, not a rare
+moment (it stays in the collection). Named mates count as Classic or Core (`RARE_MOMENT_FORMS`); variants are
+deliberately loose while they're under review, and 21 moves in DankSonPotato's games carried only a variant label. Engine
+labels and discoveries never count: the number must mean the same for every player, analysed or not. The collection's
+per-type counts are unchanged; the hero's examples use the per-type label counts on qualifying moves, which overlap.
+
 ## Layer 2: engine-analysis index (planned)
 
 ### What gets analyzed

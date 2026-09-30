@@ -12,6 +12,9 @@ export interface PlayerSummary {
   platform: Platform; username: string; display_name: string | null; games: number; positions: number;
   first_game: string | null; last_game: string | null; wins: number; draws: number; losses: number;
   rating: number | null; rating_mode?: string | null; motifs: Motif[];
+  /** Distinct moves matching at least one rare pattern (named mates as Classic or Core), per side; `types` counts
+   *  the labels on those moves, so they overlap. */
+  rare_moments: { mine: number; against: number; types: { type: string; mine: number; against: number }[] };
   best_underpromotions?: { total: number; judged: number; mine: number; against: number; found: string[] } | null;
   engine: { games_analyzed: number; positions_analyzed: number; config: { engine_name: string; limit_kind: string; limit_value: number } } | null;
   latest_import: Import | null;
