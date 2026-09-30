@@ -66,6 +66,10 @@ def test_chesscom_import(client, monkeypatch):
     client.post("/api/imports/chesscom", json={"username": "alice"})
     assert len(api_calls.calls) == 2  # archive list + current month only
 
+    # the browser engine's input: every game, compact, newest first
+    games = client.get("/api/players/chesscom/alice/engine-input").json()
+    assert len(games) == 4 and all(len(g["uci"].split()) == g["ply_count"] == len(g["flags"]) == len(g["mw"]) for g in games)
+
 
 def test_public_site_locks_admin_endpoints_and_rate_limits_imports(client, monkeypatch):
     monkeypatch.setattr(api, "PUBLIC", True)

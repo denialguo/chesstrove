@@ -699,6 +699,34 @@ def player_summary(conn: psycopg.Connection, platform: str, username: str) -> di
             "latest_import": latest_import}
 
 
+def engine_input(conn: psycopg.Connection, platform: str, username: str) -> list[dict]:
+    """A player's games in the compact form the browser engine needs, newest first. Per game, the moves
+    as space-joined strings (uci, san) and per-ply strings/arrays: captured and promotion letters ('.' for
+    none), flags (bit 1 check, 2 checkmate, 4 castling), material after each ply, legal moves before each
+    ply. `events`: [ply, type] of the game's deterministic events (the browser's priority queue)."""
+    return conn.execute(
+        """SELECT g.id, g.played_at, g.white, g.black, g.result, g.initial_fen, g.chess960, g.ply_count,
+                  g.external_id, g.source_key,
+                  substring(g.pgn from '\\[Termination "([^"]*)"\\]') AS termination,
+                  string_agg(m.uci, ' ' ORDER BY m.ply) AS uci,
+                  string_agg(m.san, ' ' ORDER BY m.ply) AS san,
+                  string_agg(coalesce(m.captured, '.'), '' ORDER BY m.ply) AS captured,
+                  string_agg(coalesce(m.promotion, '.'), '' ORDER BY m.ply) AS promotion,
+                  string_agg((m.is_check::int + 2 * m.is_checkmate::int + 4 * m.is_castling::int)::text, '' ORDER BY m.ply) AS flags,
+                  array_agg(m.material_white ORDER BY m.ply) AS mw,
+                  array_agg(m.material_black ORDER BY m.ply) AS mb,
+                  array_agg(m.legal_moves_before ORDER BY m.ply) AS legal,
+                  (SELECT coalesce(json_agg(json_build_array(e.ply, e.type) ORDER BY e.ply), '[]')
+                   FROM events e WHERE e.game_id = g.id) AS events
+           FROM games g JOIN moves m ON m.game_id = g.id
+           WHERE split_part(g.source_key, ':', 1) = %(platform)s
+             AND (lower(g.white) = lower(%(user)s) OR lower(g.black) = lower(%(user)s))
+           GROUP BY g.id
+           ORDER BY g.played_at DESC NULLS LAST, g.id DESC""",
+        {"platform": platform, "user": username},
+    ).fetchall()
+
+
 def unusual_move_candidates(conn: psycopg.Connection, config_id: int, player: str | None,
                             low: float = 0.10, high: float = 0.90) -> list[tuple[int, int]]:
     """(game_id, position) for the unusual-move discovery's two-line search: the mover played the

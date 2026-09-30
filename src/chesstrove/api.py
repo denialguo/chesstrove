@@ -19,6 +19,7 @@ from typing import Annotated, Literal
 from importlib.resources import files
 
 from fastapi import APIRouter, BackgroundTasks, Body, Depends, FastAPI, HTTPException, Path, Query, Request
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from pydantic import BaseModel, Field
@@ -29,7 +30,9 @@ from chesstrove.ingest import import_chesscom, import_lichess, import_pgn
 
 log = logging.getLogger(__name__)
 PUBLIC = os.environ.get("CHESSTROVE_PUBLIC") == "1"
-IMPORT_SLOTS = threading.BoundedSemaphore(int(os.environ.get("CHESSTROVE_IMPORT_SLOTS", "2")))  # the rest queue
+# imports running at once, per platform; the rest queue. Lichess allows one stream per IP at a time.
+IMPORT_SLOTS = {"chesscom": threading.BoundedSemaphore(int(os.environ.get("CHESSTROVE_CHESSCOM_SLOTS", "2"))),
+                "lichess": threading.BoundedSemaphore(int(os.environ.get("CHESSTROVE_LICHESS_SLOTS", "1")))}
 IMPORTS_PER_IP_HOUR = 10
 FRESH = timedelta(minutes=10)  # a finished import this recent is returned instead of starting another
 
@@ -44,6 +47,7 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(title="ChessTrove", description="Search every motif in your chess history.",
               docs_url="/api/docs", openapi_url="/api/openapi.json", lifespan=lifespan)
+app.add_middleware(GZipMiddleware, minimum_size=2000)  # the engine input is megabytes of repetitive text
 api = APIRouter(prefix="/api")
 
 
@@ -135,12 +139,12 @@ def _start_account_import(c, request: Request, background: BackgroundTasks, sour
     if PUBLIC and not _allow(_client_ip(request)):
         raise HTTPException(429, "too many imports from here; try again in an hour")
     import_id = db.start_import(c, source, username)
-    background.add_task(_queued, job, username, "me" if PUBLIC else body.user, import_id=import_id)
+    background.add_task(_queued, source, job, username, "me" if PUBLIC else body.user, import_id=import_id)
     return {"import_id": import_id, "status": "running"}
 
 
-def _queued(job, *args, **kwargs) -> None:
-    with IMPORT_SLOTS:  # waits while the others finish; the row already says "running"
+def _queued(source: str, job, *args, **kwargs) -> None:
+    with IMPORT_SLOTS[source]:  # waits while the others finish; the row already says "running"
         _in_new_connection(job, *args, **kwargs)
 
 
@@ -161,6 +165,13 @@ def player(platform: Platform, username: Username, c: Conn) -> dict:
     """A player page's data: record, rating, motif counts (theirs vs. against them), engine coverage, and
     the latest import. `games: 0` with no import means "not imported yet"."""
     return db.player_summary(c, platform, username)
+
+
+@api.get("/players/{platform}/{username}/engine-input")
+def engine_input(platform: Platform, username: Username, c: Conn) -> list[dict]:
+    """Everything the in-browser engine needs to analyse a player's games (see db.engine_input). The
+    browser keeps its evaluations to itself: nothing it computes is sent back."""
+    return db.engine_input(c, platform, username)
 
 
 @api.get("/games")

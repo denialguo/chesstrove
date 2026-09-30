@@ -46,7 +46,7 @@ The site runs on Render's free web service, with Supabase's free Postgres as the
 `CHESSTROVE_PUBLIC=1` (set by the blueprint) makes three changes:
 - It turns off PGN upload, reanalysis and the import list.
 - It returns an account's running or just-finished import instead of starting a duplicate.
-- It limits each IP to 10 imports an hour and runs 2 at a time (`CHESSTROVE_IMPORT_SLOTS`).
+- It limits each IP to 10 imports an hour and runs 2 Chess.com imports and 1 Lichess import at a time (`CHESSTROVE_CHESSCOM_SLOTS`, `CHESSTROVE_LICHESS_SLOTS`).
 
 Stockfish doesn't run on the host: the record book appears only for games analysed locally
 (`chesstrove engine analyze`) before being pushed up.
