@@ -3,7 +3,7 @@ the old one-row-per-ply table with a FEN on every row."""
 
 import pytest
 
-from chesstrove import db
+from chesstrove import compact, db
 from chesstrove.analysis import analyze
 from chesstrove.detectors import DETECTORS
 from chesstrove.importers.pgn import read_pgn
@@ -69,19 +69,59 @@ def test_view_matches_the_old_rows_and_positions_replay_exactly(conn, games):
     assert flags["e1f1"]["is_castling"] and flags["e1f1"]["san"] == "O-O"  # Chess960: king takes own rook
 
 
-def test_compacting_an_old_database_keeps_every_ply(conn, games):
+def make_legacy(conn, games) -> None:
+    """Put the database back in the old layout: one row per ply, a FEN on each."""
     conn.execute("DROP VIEW moves")
     conn.execute("TRUNCATE game_moves")
     conn.execute(LEGACY)
     with conn.cursor().copy(f"COPY moves ({', '.join(COLUMNS)}, fen_after) FROM STDIN") as copy:
         for r in games:
             copy.write_row([r[c] for c in COLUMNS] + [r["fen_after"]])
-    with pytest.raises(RuntimeError, match="compact-moves"):  # the server won't start on the old layout
-        db.init_schema(conn)
 
-    db.compact_moves(conn, batch=1, log=lambda _: None)
-    assert not db.has_legacy_moves(conn)
+
+def assert_compact(conn, games) -> None:
+    assert compact.state(conn) == "compact" and not db.has_legacy_moves(conn)
     view = conn.execute(f"SELECT {', '.join(COLUMNS)} FROM moves ORDER BY game_id, ply").fetchall()
     assert view == [{c: r[c] for c in COLUMNS} for r in games]
-    db.init_schema(conn)  # starts again
-    db.compact_moves(conn, log=lambda _: None)  # and a second run is a no-op
+    assert compact.problems(conn) == []
+    db.init_schema(conn)  # the server starts again
+
+
+@pytest.mark.parametrize("way", ["copy", "rebuild"])
+def test_converting_an_old_database_keeps_every_ply(conn, games, way):
+    make_legacy(conn, games)
+    with pytest.raises(RuntimeError, match="compact-moves"):  # the server won't start on the old layout
+        db.init_schema(conn)
+    report = compact.check(conn)
+    assert (report["state"], report["old_rows"], report["plies"]) == ("legacy", len(games), len(games))
+    assert compact.state(conn) == "legacy"  # the check changed nothing
+
+    getattr(compact, way)(conn, batch=1, log=lambda _: None)
+    assert_compact(conn, games)
+    getattr(compact, way)(conn, log=lambda _: None)  # a second run changes nothing
+    assert_compact(conn, games)
+
+
+def test_an_interrupted_copy_resumes(conn, games):
+    make_legacy(conn, games)
+    compact._schema(conn)
+    first = games[0]["game_id"]
+    conn.execute("""INSERT INTO game_moves SELECT %s, 'w', 'e2e4', 'e4', 'P', '.', '.', '{0}', '{39}', '{39}', '{1}', '{20}'""",
+                 (first,))  # a wrong, partial row from an earlier run: the check must catch it
+    assert compact.state(conn) == "converting"
+    with pytest.raises(RuntimeError, match="didn't pack completely"):
+        compact.copy(conn, log=lambda _: None)
+    assert db.has_legacy_moves(conn)  # nothing dropped
+    conn.execute("DELETE FROM game_moves WHERE game_id = %s", (first,))
+    compact.copy(conn, log=lambda _: None)
+    assert_compact(conn, games)
+
+
+def test_an_ambiguous_layout_is_refused(conn, games):
+    conn.execute("DROP VIEW moves")
+    conn.execute("ALTER TABLE game_moves RENAME TO game_moves_elsewhere")
+    assert compact.state(conn) == "ambiguous"
+    for way in (compact.copy, compact.rebuild):
+        with pytest.raises(RuntimeError, match="ambiguous"):
+            way(conn, log=lambda _: None)
+    conn.execute("ALTER TABLE game_moves_elsewhere RENAME TO game_moves")

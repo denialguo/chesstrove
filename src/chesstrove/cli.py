@@ -9,7 +9,7 @@ from pathlib import Path
 
 import psycopg
 
-from chesstrove import db, engine, insights, labels
+from chesstrove import compact, db, engine, insights, labels
 from chesstrove.analysis import reanalyze
 from chesstrove.detectors import DETECTORS
 from chesstrove.ingest import import_chesscom, import_lichess, import_pgn
@@ -19,7 +19,10 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="chesstrove")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("init-db", help="create tables (idempotent)")
-    sub.add_parser("compact-moves", help="convert the old one-row-per-move table to one row per game (back up first)")
+    p = sub.add_parser("compact-moves", help="convert the old one-row-per-move table to one row per game (back up first)")
+    p.add_argument("--check", action="store_true", help="change nothing: report the layout, counts and space needed")
+    p.add_argument("--rebuild", action="store_true",
+                   help="drop the old table first, then replay moves from stored PGNs (no extra space; destructive)")
     p = sub.add_parser("import-pgn", help="import one or more PGN files")
     p.add_argument("files", nargs="+", type=Path)
     p = sub.add_parser("import-chesscom", help="import (or catch up) a Chess.com game history")
@@ -109,7 +112,10 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     with conn:
         if args.command == "compact-moves":  # before init_schema, which refuses the old layout
-            db.compact_moves(conn)
+            if args.check:
+                _print(compact.check(conn))
+            else:
+                (compact.rebuild if args.rebuild else compact.copy)(conn)
             return 0
         db.init_schema(conn)
         match args.command:

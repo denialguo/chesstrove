@@ -50,44 +50,12 @@ def init_schema(conn: psycopg.Connection) -> None:
     conn.execute(files("chesstrove").joinpath("schema.sql").read_text())
     if has_legacy_moves(conn):
         raise RuntimeError("this database still stores one row per move (the old `moves` table). Back it up, then "
-                           "run `chesstrove compact-moves` to convert it (README, \"Compacting the moves table\").")
+                           "run `chesstrove compact-moves --check` and convert it (README, \"Compacting the moves table\").")
 
 
 def has_legacy_moves(conn: psycopg.Connection) -> bool:
     return conn.execute("""SELECT EXISTS (SELECT 1 FROM pg_class WHERE relname = 'moves' AND relkind = 'r'
                            AND relnamespace = current_schema()::regnamespace) AS x""").fetchone()["x"]
-
-
-def compact_moves(conn: psycopg.Connection, batch: int = 2000, log=print) -> None:
-    """Convert the old one-row-per-ply `moves` table into game_moves, then replace it with the view.
-    Resumable: each batch of games commits on its own and converted games are skipped, and the old table is
-    only dropped once every one of its plies is accounted for."""
-    conn.execute(files("chesstrove").joinpath("schema.sql").read_text())  # game_moves; no view while the table exists
-    if not has_legacy_moves(conn):
-        log("already compact")
-        return
-    top = conn.execute("SELECT coalesce(max(game_id), 0) AS top FROM moves").fetchone()["top"]
-    for lo in range(0, top, batch):
-        conn.execute(
-            """INSERT INTO game_moves (game_id, first_color, uci, san, piece, captured, promotion, flags,
-                                       material_white, material_black, queens_after, legal_moves_before)
-               SELECT game_id, (array_agg(color ORDER BY ply))[1],
-                      string_agg(uci, ' ' ORDER BY ply), string_agg(san, ' ' ORDER BY ply),
-                      string_agg(piece::text, '' ORDER BY ply), string_agg(coalesce(captured::text, '.'), '' ORDER BY ply),
-                      string_agg(coalesce(promotion::text, '.'), '' ORDER BY ply),
-                      array_agg((is_check::int + 2 * is_checkmate::int + 4 * is_castling::int + 8 * is_en_passant::int)::smallint ORDER BY ply),
-                      array_agg(material_white ORDER BY ply), array_agg(material_black ORDER BY ply),
-                      array_agg(queens_after ORDER BY ply), array_agg(legal_moves_before ORDER BY ply)
-               FROM moves WHERE game_id > %s AND game_id <= %s GROUP BY game_id
-               ON CONFLICT (game_id) DO NOTHING""", (lo, lo + batch))
-        log(f"games up to id {min(lo + batch, top)} of {top}")
-    old = conn.execute("SELECT count(*) AS n FROM moves").fetchone()["n"]
-    new = conn.execute("SELECT coalesce(sum(cardinality(flags)), 0) AS n FROM game_moves").fetchone()["n"]
-    if new != old:
-        raise RuntimeError(f"packed {new} plies but the old table has {old}; left it in place")
-    conn.execute("DROP TABLE moves")
-    conn.execute(files("chesstrove").joinpath("schema.sql").read_text())  # now creates the view
-    log(f"compacted {old} plies; the old table is gone")
 
 
 # --- users & accounts ----------------------------------------------------------------------------

@@ -157,9 +157,11 @@ See [schema.sql](src/chesstrove/schema.sql). Tables: `users`, `chess_accounts`, 
   the engine and archaeology SQL written against it keeps working. It's transitional: a query that joins the
   view to itself unpacks the game again per row, so neighbouring plies come from `lag()` over one unpacked
   game (`db._moves_with_neighbours`), and hot paths read `game_moves` directly (`engine_input`).
-- **Converting an old database:** `chesstrove compact-moves` packs the old `moves` table batch by batch
-  (resumable), checks that every ply made it, drops the table and creates the view. Until then the server
-  refuses to start, so new code never writes to a half-converted database.
+- **Converting an old database** (`compact.py`, `chesstrove compact-moves`): `--check` reports without changing
+  anything; the default packs the old table batch by batch (resumable), checks every game's ply count, then drops
+  it; `--rebuild` drops it first and replays stored PGNs (no extra space; every stored game replays to exactly
+  its stored rows, checked on 74,598 games). Until then the server refuses to start, so new code never writes to
+  a half-converted database.
 
 ## Layer 1 detector definitions
 

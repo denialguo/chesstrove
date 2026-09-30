@@ -76,16 +76,35 @@ still writes the app into the Python package, so `chesstrove serve` hosts both o
 ### Compacting the moves table (one-time, for databases from before October 2026)
 
 Moves used to be stored one row per ply with a position on each (~13.5 KB a game); they're now one packed row
-per game (~1.8 KB). A database in the old layout makes the server refuse to start until it's converted:
+per game (~1.8 KB). A database in the old layout makes the server refuse to start until it's converted with
+`chesstrove compact-moves`, which has three modes:
 
-1. **Back it up.** `pg_dump -Fc "$CHESSTROVE_DATABASE_URL" -f chesstrove-backup.dump` (the Supabase string;
-   `pg_dump` ships with pgserver: see `scripts/push_db.sh` for its path). Nothing else is needed for the
-   built-in local database, but a dump is cheap insurance there too.
-2. **Suspend the Render service** (Settings → Suspend), so the old code isn't writing while the table changes.
-3. **Convert:** `CHESSTROVE_DATABASE_URL='postgresql://...' uv run chesstrove compact-moves`. It works in batches,
-   can be stopped and rerun, and drops the old table only once every ply is accounted for. Peak extra space is
-   the new table, about a seventh of the old one.
-4. **Deploy the new code and resume the service.**
+- `--check` changes nothing. It reports the layout (`legacy`, `converting`, `compact`, or `ambiguous`, which every
+  mode refuses to touch), the counts, the sizes, and the space each way needs.
+- default (copy): packs the old rows into the new table in batches, checks every game's ply count, then drops
+  the old table. Old and new exist side by side, so it needs the new table's size (about a seventh of the old)
+  plus write-ahead log for it. Resumable; nothing is dropped until every game checks out.
+- `--rebuild`: drops the old table first, then replays each game's stored PGN. Needs no extra space, but the
+  old rows are gone before the new ones exist, so only use it with a verified backup, when copy doesn't fit.
+
+**Backups.** Supabase runs Postgres 17; the `pg_dump` bundled with pgserver is 16 and refuses it. Use Homebrew's
+(`brew install libpq`, then `/opt/homebrew/opt/libpq/bin/pg_dump`). Back up:
+
+```sh
+/opt/homebrew/opt/libpq/bin/pg_dump -Fc --no-owner --no-privileges --schema=public "$URL" -f chesstrove-backup.dump
+```
+
+Prove it restores (into a throwaway local Postgres that's deleted afterwards):
+`uv run scripts/restore_check.py chesstrove-backup.dump`. To restore it for real, into an empty database such as
+a new Supabase project:
+`/opt/homebrew/opt/libpq/bin/pg_restore --no-owner --no-privileges -d "$NEW_URL" chesstrove-backup.dump`
+(add `--clean --if-exists` to replace what's already there).
+
+**Native Stockfish data** (`engine_*` tables) is only needed where engine records were computed on a machine
+(`chesstrove engine analyze`); the public site falls back to browser Stockfish without it. To free that space on
+a hosted copy while keeping it locally, run this against the hosted database only (the tables stay; they're
+emptied, and nothing else references them):
+`TRUNCATE engine_move_probes, engine_positions, engine_game_status, engine_runs, engine_configs;`
 
 `CHESSTROVE_PUBLIC=1` (set by the blueprint) makes three changes:
 - It turns off PGN upload, reanalysis and the import list.
