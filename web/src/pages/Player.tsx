@@ -88,6 +88,8 @@ export function Player() {
     return counts ? [{ m, counts }] : [];
   });
   const name = summary.display_name ?? username;
+  // what the platform says they've played (Chess.com counts rated games only, hence "about")
+  const expected = summary.latest_import?.games_expected ?? null;
 
   return (
     <Shell>
@@ -108,7 +110,12 @@ export function Player() {
         <div className="case__body">
           <Dial running={running}>
             <div className="face">
-              {running ? (
+              {running && expected ? (
+                <>
+                  <Digits value={expected} places={4} className="face__count" />
+                  <span className="face__label">games on {PLATFORM_NAME[platform]}</span>
+                </>
+              ) : running ? (
                 <>
                   <Digits value={summary.games} places={4} className="face__count" />
                   <span className="face__label">games in so far</span>
@@ -130,7 +137,7 @@ export function Player() {
         </div>
         <p className="case__plate" aria-live="polite">
           {running
-            ? `Importing from ${PLATFORM_NAME[platform]}. Motifs appear as games arrive; you can leave and come back.`
+            ? `Importing from ${PLATFORM_NAME[platform]}${expected ? `: ${n(summary.games)} of ${platform === "chesscom" ? "about " : ""}${n(expected)} read so far` : ""}. Motifs appear as games arrive; you can leave and come back.`
             : <><span className="num">{n(summary.wins)}</span> wins · <span className="num">{n(summary.draws)}</span> draws · <span className="num">{n(summary.losses)}</span> losses</>}
         </p>
       </div>

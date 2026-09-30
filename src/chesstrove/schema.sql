@@ -35,6 +35,8 @@ CREATE TABLE IF NOT EXISTS imports (
 
 -- Migrations for databases created before a column existed (CREATE TABLE IF NOT EXISTS won't add it).
 ALTER TABLE imports ADD COLUMN IF NOT EXISTS games_skipped int NOT NULL DEFAULT 0;
+-- what the platform says the player has played, fetched when an account import starts (NULL: unknown)
+ALTER TABLE imports ADD COLUMN IF NOT EXISTS games_expected int;
 
 CREATE TABLE IF NOT EXISTS games (
     id            bigserial PRIMARY KEY,

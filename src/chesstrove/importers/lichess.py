@@ -29,6 +29,14 @@ RATE_LIMIT_WAIT = 60  # seconds, per Lichess API guidelines
 OpenStream = Callable[[str], Iterable[dict]]
 
 
+def expected_games(username: str) -> int:
+    """Games the player has played, all variants included (/api/user: count.all)."""
+    request = urllib.request.Request(f"https://lichess.org/api/user/{urllib.parse.quote(username.lower())}",
+                                     headers={"User-Agent": USER_AGENT, "Accept": "application/json"})
+    with urllib.request.urlopen(request, timeout=15) as response:
+        return int(json.load(response)["count"]["all"])
+
+
 def export_url(username: str, since_ms: int) -> str:
     params = {"since": since_ms, "sort": "dateAsc", "ongoing": "true", "pgnInJson": "true",
               "opening": "true", "clocks": "false", "evals": "false"}

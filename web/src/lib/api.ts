@@ -5,7 +5,7 @@ export const PLATFORM_NAME: Record<Platform, string> = { chesscom: "Chess.com", 
 
 export interface Motif { type: string; mine: number; against: number; forms?: Partial<Record<"textbook" | "canonical" | "variant", number>> }
 export interface Import {
-  id: number; status: "running" | "completed" | "failed"; finished_at: string | null; games_seen: number; games_imported: number;
+  id: number; status: "running" | "completed" | "failed"; finished_at: string | null; games_expected: number | null; games_seen: number; games_imported: number;
   games_duplicate: number; games_failed: number; games_skipped: number; errors: { error: string }[];
 }
 export interface PlayerSummary {

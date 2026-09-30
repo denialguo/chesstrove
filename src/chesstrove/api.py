@@ -26,6 +26,7 @@ from pydantic import BaseModel, Field
 
 from chesstrove import archaeology, db, detectors, insights, labels
 from chesstrove.analysis import reanalyze
+from chesstrove.importers import chesscom, lichess
 from chesstrove.ingest import import_chesscom, import_lichess, import_pgn
 
 log = logging.getLogger(__name__)
@@ -39,9 +40,11 @@ FRESH = timedelta(minutes=10)  # a finished import this recent is returned inste
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    if PUBLIC:  # imports run in this process; any still "running" were cut off by a restart
-        with db.connect() as c:
-            db.fail_running_imports(c, "interrupted by a server restart; visit the page again to resume")
+    with db.connect() as c:
+        db.init_schema(c)  # idempotent: a deploy with new columns needs no manual step
+        # imports run in this process, so any still "running" were cut off by a restart (a CLI import running
+        # alongside gets marked too, and sets its own status again when it finishes)
+        db.fail_running_imports(c, "interrupted by a server restart; visit the page again to resume")
     yield
 
 
@@ -143,9 +146,22 @@ def _start_account_import(c, request: Request, background: BackgroundTasks, sour
     return {"import_id": import_id, "status": "running"}
 
 
-def _queued(source: str, job, *args, **kwargs) -> None:
+def expected_games(source: str, username: str) -> int | None:
+    """The player's game count as the platform reports it, or None if it won't say."""
+    try:
+        return (chesscom.expected_games if source == "chesscom" else lichess.expected_games)(username)
+    except Exception:  # only a progress hint: never let it stop an import
+        log.warning("no game count for %s:%s", source, username, exc_info=True)
+        return None
+
+
+def _queued(source: str, job, username: str, *args, **kwargs) -> None:
+    # the total first, so the page can show it while the import waits for a slot
+    if (total := expected_games(source, username)) is not None:
+        with db.connect() as c:
+            db.set_games_expected(c, kwargs["import_id"], total)
     with IMPORT_SLOTS[source]:  # waits while the others finish; the row already says "running"
-        _in_new_connection(job, *args, **kwargs)
+        _in_new_connection(job, username, *args, **kwargs)
 
 
 @api.get("/imports", dependencies=LocalOnly)

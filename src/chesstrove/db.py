@@ -130,6 +130,10 @@ def get_import(conn: psycopg.Connection, import_id: int) -> dict | None:
     return conn.execute("SELECT * FROM imports WHERE id = %s", (import_id,)).fetchone()
 
 
+def set_games_expected(conn: psycopg.Connection, import_id: int, n: int) -> None:
+    conn.execute("UPDATE imports SET games_expected = %s WHERE id = %s", (n, import_id))
+
+
 def latest_import(conn: psycopg.Connection, source: str, source_ref: str) -> dict | None:
     return conn.execute("SELECT * FROM imports WHERE source = %s AND source_ref = %s ORDER BY id DESC LIMIT 1",
                         (source, source_ref)).fetchone()

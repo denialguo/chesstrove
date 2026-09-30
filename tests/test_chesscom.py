@@ -48,6 +48,12 @@ def count(conn, table: str) -> int:
     return conn.execute(f"SELECT count(*) AS n FROM {table}").fetchone()["n"]
 
 
+def test_expected_games_sums_every_chess_mode():
+    stats = {"chess_blitz": {"record": {"win": 3, "loss": 2, "draw": 1}}, "chess960_daily": {"record": {"win": 1, "loss": 0, "draw": 0}},
+             "tactics": {"highest": {"rating": 2000}}, "fide": 0}
+    assert chesscom.expected_games("Alice", lambda url: stats) == 7
+
+
 def test_games_in_archive_maps_api_fields():
     items = list(chesscom.games_in_archive({"games": [api_game(7, rated=False), api_game(8, rules="bughouse"),
                                                       {"url": "x", "rules": "chess"}]}))
