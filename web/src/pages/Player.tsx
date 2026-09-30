@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { ChevronDown } from "lucide-react";
 import { Board } from "../components/Board";
@@ -9,7 +9,9 @@ import { EngineRecordBook } from "../components/EngineRecordBook";
 import { TopBar } from "../components/TopBar";
 import { api, type Motif, ApiError, PLATFORM_NAME, type EventRow, type Platform, type PlayerSummary } from "../lib/api";
 import { formatDate, formatMonth, moveLabel, n, plural, roughDuration } from "../lib/format";
-import { FORM_NAME, MOTIFS, NAMED_MATES, formNote, type MateForm, type MotifInfo } from "../lib/motifs";
+import { BEST_UNDERPROMOTION, FORM_NAME, MOTIFS, NAMED_MATES, formNote, type MateForm, type MotifInfo } from "../lib/motifs";
+import { supported } from "../engine/runner";
+import { checkUnderpromotions, savedVerdicts, type UpVerdict } from "../engine/underpromotions";
 
 const POLL_MS = 2000;
 
@@ -162,9 +164,13 @@ export function Player() {
           {MOTIFS.map((m) => ({ m, counts: summary.motifs.find((x) => x.type === m.type) ?? { mine: 0, against: 0 } }))
             // found patterns first; the empty ones wait at the bottom
             .sort((a, b) => Number(b.counts.mine + b.counts.against > 0) - Number(a.counts.mine + a.counts.against > 0))
-            .map(({ m, counts }) => {
-            return <MotifRow key={m.type} motif={m} mine={counts.mine} against={counts.against} platform={platform} username={username} name={name} />;
-          })}
+            .flatMap(({ m, counts }) => [
+              <MotifRow key={m.type} motif={m} mine={counts.mine} against={counts.against} platform={platform} username={username} name={name} />,
+              ...(m.type === "UNDERPROMOTION" && counts.mine + counts.against > 0
+                ? [<BestUnderpromotionRow key="BEST_UNDERPROMOTION" platform={platform} username={username} name={name}
+                     total={counts.mine + counts.against} server={summary.best_underpromotions ?? null} />]
+                : []),
+            ])}
         </ul>
       </section>
 
@@ -242,11 +248,97 @@ function MotifRow({ motif, mine, against, forms, platform, username, name }: {
   );
 }
 
-function Specimens({ platform, username, type, side }: { platform: Platform; username: string; type: string; side: "mine" | "against" }) {
+/** Underpromotions that were the single best move. Needs Stockfish: the server's verdicts where ChessTrove
+ * analysed the player, otherwise a one-click check in this browser (engine/underpromotions.ts). */
+function BestUnderpromotionRow({ platform, username, name, total, server }: {
+  platform: Platform; username: string; name: string; total: number; server: PlayerSummary["best_underpromotions"] | null;
+}) {
+  const [saved, setSaved] = useState<UpVerdict[] | null>(null);
+  const [checking, setChecking] = useState<{ done: number; total: number } | null>(null);
+  const [failed, setFailed] = useState<string | null>(null);
+  const [open, setOpen] = useState(false);
+  const [side, setSide] = useState<"mine" | "against">("mine");
+  const canRun = supported();
+  useEffect(() => {
+    if (server || !canRun) return;
+    savedVerdicts(platform, username).then(setSaved).catch(() => setSaved([]));
+  }, [platform, username, server, canRun]);
+
+  const verdicts = server ? null : saved ?? [];
+  const found = useMemo(() => new Set(server ? server.found : (verdicts ?? []).filter((v) => v.best === "unique_best").map((v) => v.key)),
+    [server, verdicts]);
+  const mine = server ? server.mine : (verdicts ?? []).filter((v) => v.best === "unique_best" && v.mine).length;
+  const against = server ? server.against : (verdicts ?? []).filter((v) => v.best === "unique_best" && !v.mine).length;
+  const judged = server ? server.judged : (verdicts ?? []).length;
+  const locked = !server && judged === 0;
+  const remaining = server ? 0 : total - judged;
+
+  const check = async () => {
+    setFailed(null);
+    setChecking({ done: 0, total: remaining });
+    try {
+      await checkUnderpromotions(platform, username, (v, done, all) => {
+        setSaved((s) => [...(s ?? []), v]);
+        setChecking({ done, total: all });
+      });
+    } catch (e) {
+      setFailed(e instanceof Error ? e.message : String(e));
+    }
+    setChecking(null);
+  };
+
+  const empty = !locked && mine + against === 0;
+  const panelId = "motif-BEST_UNDERPROMOTION";
+  const note = !canRun && !server ? "Needs a browser that can run Stockfish."
+    : checking ? `Stockfish is checking them on this device: ${checking.done} of ${checking.total}.`
+    : locked ? `Was any of these ${plural(total, "underpromotion")} the only best move? Stockfish can check them on this device in ${roughDuration((total * 3) / 2)}.`
+    : empty ? `None of the ${plural(judged, "underpromotion")} Stockfish checked was the single best move.`
+    : BEST_UNDERPROMOTION.definition;
+  return (
+    <li className={`ledger__row ledger__row--derived ${empty || locked ? "ledger__row--empty" : ""} ${open ? "ledger__row--open" : ""}`}>
+      <div className="ledger__summary-wrap">
+        <button type="button" className="ledger__summary" disabled={empty || locked} aria-expanded={open} aria-controls={panelId}
+          onClick={() => setOpen(!open)}>
+          {locked ? <span className="ledger__count ledger__lock" aria-label="not checked yet">?</span> : <Digits value={mine} className="ledger__count" />}
+          <span className="ledger__motif">
+            <span className="glyph">{BEST_UNDERPROMOTION.glyph}</span>
+            <span className="ledger__text">
+              <span className="ledger__name">{BEST_UNDERPROMOTION.name}</span>
+              <span className="ledger__def">{failed ? `The check stopped: ${failed}.` : note}</span>
+            </span>
+          </span>
+          {locked ? <span className="ledger__count ledger__count--against ledger__lock" aria-hidden="true">?</span>
+            : <Digits value={against} className="ledger__count ledger__count--against" />}
+          {!empty && !locked && <ChevronDown className="ledger__chev" size={18} aria-hidden="true" />}
+        </button>
+        {canRun && !server && (locked || remaining > 0) && (
+          <button type="button" className="engine-btn engine-btn--go ledger__unlock" disabled={!!checking} onClick={check}>
+            {checking ? "Checking…" : locked ? "Check with Stockfish" : `Check the other ${remaining}`}
+          </button>
+        )}
+      </div>
+      {open && (
+        <div id={panelId} className="ledger__panel">
+          <div className="seg" role="tablist" aria-label="Whose moves">
+            <button role="tab" aria-selected={side === "mine"} disabled={mine === 0} onClick={() => setSide("mine")}>By {name} ({n(mine)})</button>
+            <button role="tab" aria-selected={side === "against"} disabled={against === 0} onClick={() => setSide("against")}>Against ({n(against)})</button>
+          </div>
+          <Specimens key={side} platform={platform} username={username} type="UNDERPROMOTION" side={side} only={found} />
+        </div>
+      )}
+    </li>
+  );
+}
+
+function Specimens({ platform, username, type, side, only }: {
+  platform: Platform; username: string; type: string; side: "mine" | "against"; only?: Set<string>; // only these "game:ply"
+}) {
   const [rows, setRows] = useState<EventRow[] | null>(null);
   useEffect(() => {
-    (side === "mine" ? api.events(platform, username, type) : api.eventsAgainst(platform, username, type)).then(setRows).catch(() => setRows([]));
-  }, [platform, username, type, side]);
+    const limit = only ? 1000 : 24;
+    (side === "mine" ? api.events(platform, username, type, limit) : api.eventsAgainst(platform, username, type, limit))
+      .then((r) => setRows(only ? r.filter((e) => only.has(`${e.game_id}:${e.ply}`)) : r)).catch(() => setRows([]));
+  }, [platform, username, type, side, only]);
   if (!rows) return <p className="loading">Loading positions…</p>;
   if (!rows.length) return <p className="muted">None on this side.</p>;
   return (

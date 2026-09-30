@@ -53,7 +53,8 @@ export const ENGINE_LABELS: LabelInfo[] = [
 // Named mates come in three forms (backend: named_mates.grade). `short_of` names the traits that kept one
 // out of the next form up; these say what differs from the classical picture, not what's wrong.
 export type MateForm = "textbook" | "canonical" | "variant";
-export const FORM_NAME: Record<MateForm, string> = { textbook: "Textbook", canonical: "Canonical", variant: "Variant" };
+// what players see; the stored values stay textbook / canonical / variant
+export const FORM_NAME: Record<MateForm, string> = { textbook: "Classic", canonical: "Core", variant: "Variant" };
 const DIFFERS: Record<string, string> = {
   no_extra_helpers: "other pieces help close the net",
   both_shoulders_are_rooks: "the shoulder pieces aren't both rooks",
@@ -82,5 +83,11 @@ export function formNote(metadata: Record<string, unknown>): { form: MateForm; n
   const why = ((metadata.short_of as string[] | undefined) ?? []).map((t) => DIFFERS[t] ?? t.replaceAll("_", " "));
   return { form, note: why.length ? `${why.join("; ")}.`.replace(/^./, (c) => c.toUpperCase()) : "" };
 }
+
+/** A collection row that needs Stockfish: shown next to Underpromotion, locked until analysed. */
+export const BEST_UNDERPROMOTION: MotifInfo = {
+  type: "BEST_UNDERPROMOTION", glyph: "=N!", name: "Best-move underpromotion",
+  definition: "Stockfish found the underpromotion was the single best move: every other move, queening included, was worse.",
+};
 
 export const motifInfo = (type: string) => [...MOTIFS, ...NAMED_MATES].find((m) => m.type === type);

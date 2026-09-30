@@ -172,3 +172,17 @@ def _best_move_verdict(played: str, flip: bool, board: chess.Board, results: lis
             "tied_for_best_move": is_best and len(best) > 1,
             "unique_best_move": is_best and len(best) == 1,
             "played_move_rank": 1 + sum(1 for sc in scores.values() if sc > scores[played])}
+
+
+def best_underpromotions(conn: psycopg.Connection, platform: str, username: str) -> dict | None:
+    """The player-page row 'Best-move underpromotion': underpromotions (by the player and against them)
+    that the native index judged the single best move among all legal moves (the all_moves probe). None
+    when the index hasn't judged any of this player's underpromotions: the browser check takes over."""
+    events = [*[{**e, "mine": True} for e in db.list_events(conn, "UNDERPROMOTION", player=username, platform=platform, limit=10_000)],
+              *[{**e, "mine": False} for e in db.list_events(conn, "UNDERPROMOTION", against=username, platform=platform, limit=10_000)]]
+    judged = [e for e in annotate(conn, events) if (e["engine_analysis"] or {}).get("unique_best_move") is not None]
+    if not judged:
+        return None
+    best = [e for e in judged if e["engine_analysis"]["unique_best_move"]]
+    return {"total": len(events), "judged": len(judged), "mine": sum(e["mine"] for e in best),
+            "against": sum(not e["mine"] for e in best), "found": [f"{e['game_id']}:{e['ply']}" for e in best]}

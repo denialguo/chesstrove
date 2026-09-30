@@ -178,6 +178,9 @@ different diagrams, and common usage stretches some names (Epaulette with non-ro
 bishop instead of a pawn). ChessTrove doesn't pretend otherwise. It keeps a recognised broad **family**
 searchable, and records on every event how far the position is from the classical picture:
 
+Players see these as **Classic** (`textbook`), **Core** (`canonical`) and **Variant**; the stored values
+keep their original names.
+
 | Form | Meaning |
 |---|---|
 | `textbook` | Looks like the diagram people learn under that name. |
@@ -774,6 +777,16 @@ behind it.
   matches on all 5,511 non-Chess960 games of the three local accounts: the same games, plies, order and
   values, with exact ties allowed to swap (Postgres computes `exp()` in numeric, the browser in doubles).
 - Chess960 games are skipped for now.
+
+**Best-move underpromotion.** This collection row sits next to Underpromotion and needs Stockfish. It
+counts underpromotions, the player's and their opponents', that were the single best of all legal moves.
+- Players ChessTrove analysed natively get the server's verdicts (`insights.best_underpromotions`, from the
+  all_moves probes).
+- Everyone else sees it locked, with a "Check with Stockfish" button. The check runs only the all_moves
+  searches, one per underpromotion (`engine/underpromotions.ts`): a 25k-node baseline for the depth target,
+  then every legal move scored. It shares the verdict code with the record book.
+- Each verdict is saved to IndexedDB as it's found, and a partial check offers to do the rest.
+- It takes about 2 s per underpromotion across two workers: Hikaru's 216 take about 4 minutes.
 
 **Workers.** Balanced 2, Fast min(4, cores − 1), Max cores − 1. A constrained device gets one worker whatever
 the setting: ≤ 4 cores, ≤ 4 GB `deviceMemory`, or a coarse pointer.

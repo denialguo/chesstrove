@@ -303,6 +303,33 @@ function longestMateFound(rows: MoveRow[], limit: number): Discovery[] {
 /** Probe scores from the mover's side, comparable across lines (chess.engine.Score order). */
 const lineOrd = (l: ProbeLine, color: Color) => ordinal(color, color, l.score_cp, l.mate);
 
+/** uci -> a key; moves with the same key are one choice (insights._transposition_keys). */
+function transpositionKeys(fenBefore: string, lines: ProbeLine[]): Record<string, string> {
+  return Object.fromEntries(lines.map((l) => {
+    const pv = l.pv;
+    if (pv.length >= 2 && pv[0].length === 5 && pv[1].slice(2, 4) === pv[0].slice(2, 4)) return [l.uci, `promotion ${pv[0].slice(0, 4)} captured`];
+    return [l.uci, (pv.length >= 2 && epdAfter(fenBefore, pv.slice(0, 2))) || l.uci];
+  }));
+}
+
+export type BestMove = "unique_best" | "tied_best" | "not_best" | "unknown";
+
+/** Was `played` the best of all `legal` moves, from an all_moves probe (insights._best_move_verdict)?
+ * Only when every legal move got a score; moves that transpose into the same position tie. */
+export function bestMoveVerdict(fenBefore: string, played: string, color: Color, legal: number, am: Probe | undefined):
+    { best: BestMove; rank: number | null; bestMoves: string[] } {
+  if (!am || am.results.length !== legal || !am.results.some((l) => l.uci === played)) return { best: "unknown", rank: null, bestMoves: [] };
+  const k = transpositionKeys(fenBefore, am.results);
+  const raw = Object.fromEntries(am.results.map((l) => [l.uci, lineOrd(l, color)]));
+  const cls: Record<string, number> = {};
+  for (const [u, sc] of Object.entries(raw)) cls[k[u]] = Math.max(cls[k[u]] ?? -Infinity, sc);
+  const scores = Object.fromEntries(Object.keys(raw).map((u) => [u, cls[k[u]]]));
+  const top = Math.max(...Object.values(scores));
+  const bestMoves = Object.keys(scores).filter((u) => scores[u] === top).sort();
+  return { best: scores[played] === top ? (bestMoves.length === 1 ? "unique_best" : "tied_best") : "not_best",
+           rank: 1 + Object.values(scores).filter((sc) => sc > scores[played]).length, bestMoves };
+}
+
 function underpromotion(games: Analysed, limit: number): Discovery[] {
   const out: (Discovery & { _rank: number; _vrank: number; _t: number })[] = [];
   for (const { g, r } of games) {
@@ -312,11 +339,7 @@ function underpromotion(games: Analysed, limit: number): Discovery[] {
       if (!b || !a) continue;
       const played = g.moves[ply - 1];
       const fenBefore = fenAt(g, ply - 1);
-      const keys = (lines: ProbeLine[]) => Object.fromEntries(lines.map((l) => {
-        const pv = l.pv;
-        if (pv.length >= 2 && pv[0].length === 5 && pv[1].slice(2, 4) === pv[0].slice(2, 4)) return [l.uci, `promotion ${pv[0].slice(0, 4)} captured`];
-        return [l.uci, (pv.length >= 2 && epdAfter(fenBefore, pv.slice(0, 2))) || l.uci];
-      }));
+      const keys = (lines: ProbeLine[]) => transpositionKeys(fenBefore, lines);
       let vsQueen = "unknown";
       const vq = r.probes[`${ply - 1}:vs_queen`];
       if (vq) {
@@ -328,20 +351,8 @@ function underpromotion(games: Analysed, limit: number): Discovery[] {
           vsQueen = !transposes && s[played] > s[queen] ? "better" : transposes || s[played] === s[queen] ? "equal" : "worse";
         }
       }
-      let best = "unknown", rank: number | null = null, bestMoves: string[] = [];
-      const am = r.probes[`${ply - 1}:all_moves`];
       const legal = g.legal[ply - 1];
-      if (am && am.results.length === legal && am.results.some((l) => l.uci === played)) {
-        const k = keys(am.results);
-        const raw = Object.fromEntries(am.results.map((l) => [l.uci, lineOrd(l, g.color)]));
-        const cls: Record<string, number> = {};
-        for (const [u, sc] of Object.entries(raw)) cls[k[u]] = Math.max(cls[k[u]] ?? -Infinity, sc);
-        const scores = Object.fromEntries(Object.keys(raw).map((u) => [u, cls[k[u]]]));
-        const top = Math.max(...Object.values(scores));
-        bestMoves = Object.keys(scores).filter((u) => scores[u] === top).sort();
-        rank = 1 + Object.values(scores).filter((sc) => sc > scores[played]).length;
-        best = scores[played] === top ? (bestMoves.length === 1 ? "unique_best" : "tied_best") : "not_best";
-      }
+      const { best, rank, bestMoves } = bestMoveVerdict(fenBefore, played, g.color, legal, r.probes[`${ply - 1}:all_moves`]);
       out.push({
         game: gameOf(g), ply, color: g.color, player: g.color === "w" ? g.white : g.black,
         opponent: g.color === "w" ? g.black : g.white,

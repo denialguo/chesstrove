@@ -36,6 +36,9 @@ function tx<T>(store: string, mode: IDBTransactionMode, fn: (s: IDBObjectStore) 
 export const playerKey = (config: string, platform: string, user: string) => `${config}|${platform}|${user.toLowerCase()}`;
 
 export const store = {
+  /** Any records under `${prefix}|`; for results that aren't a whole game (e.g. the underpromotion check). */
+  items: <T>(prefix: string) => tx<T[]>("games", "readonly", (s) => s.getAll(IDBKeyRange.bound(`${prefix}|`, `${prefix}|\uffff`))),
+  putItem: (key: string, value: unknown) => tx("games", "readwrite", (s) => s.put(value, key)),
   games: (player: string) =>
     tx<StoredGame[]>("games", "readonly", (s) => s.getAll(IDBKeyRange.bound(`${player}|`, `${player}|￿`))),
   putGame: (player: string, g: StoredGame) => tx("games", "readwrite", (s) => s.put(g, `${player}|${g.gameId}`)),

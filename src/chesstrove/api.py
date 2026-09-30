@@ -179,8 +179,9 @@ def get_import(import_id: int, c: Conn) -> dict:
 @api.get("/players/{platform}/{username}")
 def player(platform: Platform, username: Username, c: Conn) -> dict:
     """A player page's data: record, rating, motif counts (theirs vs. against them), engine coverage, and
-    the latest import. `games: 0` with no import means "not imported yet"."""
-    return db.player_summary(c, platform, username)
+    the latest import. `games: 0` with no import means "not imported yet". `best_underpromotions`: the
+    native index's verdicts, or null if it has none for this player."""
+    return {**db.player_summary(c, platform, username), "best_underpromotions": insights.best_underpromotions(c, platform, username)}
 
 
 @api.get("/players/{platform}/{username}/engine-input")
