@@ -68,26 +68,48 @@ CREATE INDEX IF NOT EXISTS games_white ON games (lower(white));
 CREATE INDEX IF NOT EXISTS games_black ON games (lower(black));
 
 -- One row per mainline ply. fen_before of ply n is fen_after of ply n-1 (or games.initial_fen).
-CREATE TABLE IF NOT EXISTS moves (
-    game_id           bigint NOT NULL REFERENCES games ON DELETE CASCADE,
-    ply               int NOT NULL,
-    color             char(1) NOT NULL CHECK (color IN ('w', 'b')),
-    san               text NOT NULL,
-    uci               text NOT NULL,
-    piece             char(1) NOT NULL,
-    captured          char(1),
-    promotion         char(1),
-    is_check          boolean NOT NULL,
-    is_checkmate      boolean NOT NULL,
-    is_castling       boolean NOT NULL,
-    is_en_passant     boolean NOT NULL,
-    fen_after         text NOT NULL,
-    material_white    smallint NOT NULL,
-    material_black    smallint NOT NULL,
-    queens_after      smallint NOT NULL,
-    legal_moves_before smallint NOT NULL,
-    PRIMARY KEY (game_id, ply)
+-- A game's moves, one row per game: the move-by-move facts packed ply by ply (string position i / array
+-- element i+1 = ply i+1). Positions (FENs) aren't stored; they're replayed from uci when needed
+-- (db.positions, ~0.3 ms a game). One row per ply with a FEN each cost ~13 KB a game; this is ~2 KB.
+CREATE TABLE IF NOT EXISTS game_moves (
+    game_id            bigint PRIMARY KEY REFERENCES games ON DELETE CASCADE,
+    first_color        char(1) NOT NULL CHECK (first_color IN ('w', 'b')),  -- who played ply 1
+    uci                text NOT NULL,        -- space-separated
+    san                text NOT NULL,        -- space-separated
+    piece              text NOT NULL,        -- one letter per ply: P N B R Q K
+    captured           text NOT NULL,        -- one letter per ply, '.' for none
+    promotion          text NOT NULL,        -- one letter per ply, '.' for none
+    flags              smallint[] NOT NULL,  -- 1 check, 2 checkmate, 4 castling, 8 en passant
+    material_white     smallint[] NOT NULL,  -- after the ply, P=1 N=3 B=3 R=5 Q=9
+    material_black     smallint[] NOT NULL,
+    queens_after       smallint[] NOT NULL,
+    legal_moves_before smallint[] NOT NULL
 );
+
+-- The old one-row-per-ply shape, unpacked on the fly, so queries written against it keep working. Transitional:
+-- hot paths should read game_moves directly (see engine_input). Created once the old `moves` table is gone
+-- (`chesstrove compact-moves` converts it).
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_class WHERE relname = 'moves' AND relkind = 'r'
+                 AND relnamespace = current_schema()::regnamespace) THEN
+    CREATE OR REPLACE VIEW moves AS
+      SELECT gm.game_id, m.ply::int AS ply,
+             (CASE WHEN (m.ply % 2 = 1) = (gm.first_color = 'w') THEN 'w' ELSE 'b' END)::char(1) AS color,
+             m.san, m.uci, m.piece::char(1) AS piece,
+             nullif(m.captured, '.')::char(1) AS captured, nullif(m.promotion, '.')::char(1) AS promotion,
+             (m.flags & 1) <> 0 AS is_check, (m.flags & 2) <> 0 AS is_checkmate,
+             (m.flags & 4) <> 0 AS is_castling, (m.flags & 8) <> 0 AS is_en_passant,
+             m.material_white, m.material_black, m.queens_after, m.legal_moves_before
+      FROM game_moves gm
+      CROSS JOIN LATERAL unnest(string_to_array(gm.uci, ' '), string_to_array(gm.san, ' '),
+                                string_to_array(gm.piece, NULL), string_to_array(gm.captured, NULL),
+                                string_to_array(gm.promotion, NULL), gm.flags, gm.material_white,
+                                gm.material_black, gm.queens_after, gm.legal_moves_before)
+        WITH ORDINALITY AS m(uci, san, piece, captured, promotion, flags, material_white, material_black,
+                             queens_after, legal_moves_before, ply);
+  END IF;
+END $$;
 
 -- Derived data: everything below can be deleted and rebuilt with `chesstrove reanalyze --all`.
 CREATE TABLE IF NOT EXISTS analysis_runs (

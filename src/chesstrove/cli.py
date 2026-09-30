@@ -19,6 +19,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="chesstrove")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("init-db", help="create tables (idempotent)")
+    sub.add_parser("compact-moves", help="convert the old one-row-per-move table to one row per game (back up first)")
     p = sub.add_parser("import-pgn", help="import one or more PGN files")
     p.add_argument("files", nargs="+", type=Path)
     p = sub.add_parser("import-chesscom", help="import (or catch up) a Chess.com game history")
@@ -107,6 +108,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"can't connect to the database: {e}{hint}", file=sys.stderr)
         return 1
     with conn:
+        if args.command == "compact-moves":  # before init_schema, which refuses the old layout
+            db.compact_moves(conn)
+            return 0
         db.init_schema(conn)
         match args.command:
             case "init-db":

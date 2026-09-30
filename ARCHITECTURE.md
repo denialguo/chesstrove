@@ -46,7 +46,7 @@ PGN file / Chess.com API / Lichess API
         ▼
   replay(game)                   reconstruction.py, one pass, yields MoveContext per ply
         │                        (board_before, move, board_after, san, MoveFacts)
-        ├──► moves rows          COPY, per game
+        ├──► game_moves rows     COPY, one packed row per game
         └──► detectors/          every detector sees the same MoveContext stream (analysis.analyze)
                   ▼
                events rows + game_analysis (which detector versions saw this game)
@@ -121,8 +121,8 @@ The importer "interface" is a convention rather than an ABC: an importer is any 
 
 ## Schema: Layer 1 (built)
 
-See [schema.sql](src/chesstrove/schema.sql). Tables: `users`, `chess_accounts`, `imports`, `games`, `moves`,
-`analysis_runs`, `events`, `game_analysis`.
+See [schema.sql](src/chesstrove/schema.sql). Tables: `users`, `chess_accounts`, `imports`, `games`, `game_moves`,
+`analysis_runs`, `events`, `game_analysis`, plus the `moves` view.
 
 - **Idempotency:** `games.source_key UNIQUE` + `INSERT … ON CONFLICT DO NOTHING RETURNING id`.
 - **Resumability:** re-running an import skips stored games before replaying them. For Chess.com,
@@ -133,21 +133,33 @@ See [schema.sql](src/chesstrove/schema.sql). Tables: `users`, `chess_accounts`, 
   checkpoint can stop before the first one: a game in progress during one import is fetched again (finished)
   by the next. Both sources read their resume state as a union/max over all past imports of the account, so a
   fresh import row never hides progress.
-- **Failure isolation:** a savepoint per game, a transaction per 500 games. Unsupported variants are counted in
+- **Failure isolation:** a transaction per batch (a Chess.com month, or 500 games), written in a few statements;
+  a batch the database refuses is redone with a savepoint per game. Unsupported variants are counted in
   `games_skipped` (intentional, not an error). Other failures go to `imports.errors`
   (capped at 1000) with their index in the input. A game that *raises* while being stored (as opposed to a
   deterministic parse failure) holds the source's resume point, so it's retried next run.
-- **Raw vs derived:** `games`/`moves` never reference `events`. `events(detector_id, detector_version)` +
+- **Raw vs derived:** `games`/`game_moves` never reference `events`. `events(detector_id, detector_version)` +
   `analysis_runs.detector_versions` say what produced what.
 - **Versioning / reprocessing:** `game_analysis.detector_versions` records, per game, which version of each
   detector has seen it. A game is stale for a detector iff `NOT detector_versions @> '{"ID": v}'`.
   `chesstrove reanalyze` (no args) finds detectors that are stale anywhere (bumped version or newly added),
-  replays only the stale games from stored `moves.uci`, runs only those detectors, and replaces their events.
+  replays only the stale games from stored `game_moves.uci`, runs only those detectors, and replaces their events.
   One transaction per 500 games, so an interrupted run just resumes. `--detector X` limits it; `--all` forces
   every game. Nothing is downloaded or re-parsed.
-- **Lookups:** by game (`moves` PK, `events` unique key leads with `game_id`), by event type
+- **Lookups:** by game (`game_moves` PK, `events` unique key leads with `game_id`), by event type
   (`events(type, color)`), by date and player (`games.played_at`, `lower(white|black)`).
-- `moves` stores `fen_after` only. `fen_before` of ply *n* is `fen_after` of ply *n−1* or `games.initial_fen`.
+- **Moves are packed, positions aren't stored.** `game_moves` is one row per game: UCI and SAN as
+  space-separated strings, piece/capture/promotion letters as one character per ply, and the flags, material,
+  queen counts and legal-move counts as `smallint[]`. That's ~1.8 KB a game. The old layout, one row per ply
+  with a FEN on each, was ~13.5 KB and 75% of the database. Positions come from `db.positions` /
+  `db.attach_fens`, which replay only the games a response shows (~0.3 ms a game).
+- **The `moves` view** unpacks `game_moves` into the old one-row-per-ply columns (everything but `fen_after`), so
+  the engine and archaeology SQL written against it keeps working. It's transitional: a query that joins the
+  view to itself unpacks the game again per row, so neighbouring plies come from `lag()` over one unpacked
+  game (`db._moves_with_neighbours`), and hot paths read `game_moves` directly (`engine_input`).
+- **Converting an old database:** `chesstrove compact-moves` packs the old `moves` table batch by batch
+  (resumable), checks that every ply made it, drops the table and creates the view. Until then the server
+  refuses to start, so new code never writes to a half-converted database.
 
 ## Layer 1 detector definitions
 

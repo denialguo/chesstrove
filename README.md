@@ -73,6 +73,20 @@ deployments get their own URLs, so they can load but can't reach the API unless 
 Locally nothing changes: `npx vite` in `web/` proxies `/api` to `chesstrove serve`, and `npm run build`
 still writes the app into the Python package, so `chesstrove serve` hosts both on one port.
 
+### Compacting the moves table (one-time, for databases from before October 2026)
+
+Moves used to be stored one row per ply with a position on each (~13.5 KB a game); they're now one packed row
+per game (~1.8 KB). A database in the old layout makes the server refuse to start until it's converted:
+
+1. **Back it up.** `pg_dump -Fc "$CHESSTROVE_DATABASE_URL" -f chesstrove-backup.dump` (the Supabase string;
+   `pg_dump` ships with pgserver: see `scripts/push_db.sh` for its path). Nothing else is needed for the
+   built-in local database, but a dump is cheap insurance there too.
+2. **Suspend the Render service** (Settings → Suspend), so the old code isn't writing while the table changes.
+3. **Convert:** `CHESSTROVE_DATABASE_URL='postgresql://...' uv run chesstrove compact-moves`. It works in batches,
+   can be stopped and rerun, and drops the old table only once every ply is accounted for. Peak extra space is
+   the new table, about a seventh of the old one.
+4. **Deploy the new code and resume the service.**
+
 `CHESSTROVE_PUBLIC=1` (set by the blueprint) makes three changes:
 - It turns off PGN upload, reanalysis and the import list.
 - It returns an account's running or just-finished import instead of starting a duplicate.

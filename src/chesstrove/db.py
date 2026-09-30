@@ -9,6 +9,7 @@ from importlib.resources import files
 from pathlib import Path
 from typing import Any
 
+import chess
 import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
@@ -19,10 +20,8 @@ from chesstrove.models import CanonicalGame, MoveFacts
 
 MAX_STORED_ERRORS = 1000
 
-MOVE_COLUMNS = (
-    "game_id, ply, color, san, uci, piece, captured, promotion, is_check, is_checkmate, is_castling, "
-    "is_en_passant, fen_after, material_white, material_black, queens_after, legal_moves_before"
-)
+GAME_MOVES_COLUMNS = ("game_id, first_color, uci, san, piece, captured, promotion, flags, material_white, "
+                      "material_black, queens_after, legal_moves_before")
 
 
 def connect(dsn: str | None = None) -> psycopg.Connection[dict[str, Any]]:
@@ -49,6 +48,46 @@ def embedded_dsn() -> str:
 
 def init_schema(conn: psycopg.Connection) -> None:
     conn.execute(files("chesstrove").joinpath("schema.sql").read_text())
+    if has_legacy_moves(conn):
+        raise RuntimeError("this database still stores one row per move (the old `moves` table). Back it up, then "
+                           "run `chesstrove compact-moves` to convert it (README, \"Compacting the moves table\").")
+
+
+def has_legacy_moves(conn: psycopg.Connection) -> bool:
+    return conn.execute("""SELECT EXISTS (SELECT 1 FROM pg_class WHERE relname = 'moves' AND relkind = 'r'
+                           AND relnamespace = current_schema()::regnamespace) AS x""").fetchone()["x"]
+
+
+def compact_moves(conn: psycopg.Connection, batch: int = 2000, log=print) -> None:
+    """Convert the old one-row-per-ply `moves` table into game_moves, then replace it with the view.
+    Resumable: each batch of games commits on its own and converted games are skipped, and the old table is
+    only dropped once every one of its plies is accounted for."""
+    conn.execute(files("chesstrove").joinpath("schema.sql").read_text())  # game_moves; no view while the table exists
+    if not has_legacy_moves(conn):
+        log("already compact")
+        return
+    top = conn.execute("SELECT coalesce(max(game_id), 0) AS top FROM moves").fetchone()["top"]
+    for lo in range(0, top, batch):
+        conn.execute(
+            """INSERT INTO game_moves (game_id, first_color, uci, san, piece, captured, promotion, flags,
+                                       material_white, material_black, queens_after, legal_moves_before)
+               SELECT game_id, (array_agg(color ORDER BY ply))[1],
+                      string_agg(uci, ' ' ORDER BY ply), string_agg(san, ' ' ORDER BY ply),
+                      string_agg(piece::text, '' ORDER BY ply), string_agg(coalesce(captured::text, '.'), '' ORDER BY ply),
+                      string_agg(coalesce(promotion::text, '.'), '' ORDER BY ply),
+                      array_agg((is_check::int + 2 * is_checkmate::int + 4 * is_castling::int + 8 * is_en_passant::int)::smallint ORDER BY ply),
+                      array_agg(material_white ORDER BY ply), array_agg(material_black ORDER BY ply),
+                      array_agg(queens_after ORDER BY ply), array_agg(legal_moves_before ORDER BY ply)
+               FROM moves WHERE game_id > %s AND game_id <= %s GROUP BY game_id
+               ON CONFLICT (game_id) DO NOTHING""", (lo, lo + batch))
+        log(f"games up to id {min(lo + batch, top)} of {top}")
+    old = conn.execute("SELECT count(*) AS n FROM moves").fetchone()["n"]
+    new = conn.execute("SELECT coalesce(sum(cardinality(flags)), 0) AS n FROM game_moves").fetchone()["n"]
+    if new != old:
+        raise RuntimeError(f"packed {new} plies but the old table has {old}; left it in place")
+    conn.execute("DROP TABLE moves")
+    conn.execute(files("chesstrove").joinpath("schema.sql").read_text())  # now creates the view
+    log(f"compacted {old} plies; the old table is gone")
 
 
 # --- users & accounts ----------------------------------------------------------------------------
@@ -183,17 +222,47 @@ def existing_game_keys(conn: psycopg.Connection, keys: list[str]) -> set[str]:
 
 
 def insert_moves(conn: psycopg.Connection, games: list[tuple[int, list[MoveFacts]]]) -> None:
-    """(game id, facts) pairs, all in one COPY."""
-    if not any(facts for _, facts in games):
+    """(game id, facts) pairs, all in one COPY, one packed row per game (schema.sql: game_moves)."""
+    games = [(game_id, facts) for game_id, facts in games if facts]
+    if not games:
         return
-    with conn.cursor().copy(f"COPY moves ({MOVE_COLUMNS}) FROM STDIN") as copy:
+    with conn.cursor().copy(f"COPY game_moves ({GAME_MOVES_COLUMNS}) FROM STDIN") as copy:
         for game_id, facts in games:
-            for f in facts:
-                copy.write_row((
-                    game_id, f.ply, f.color, f.san, f.uci, f.piece, f.captured, f.promotion, f.is_check,
-                    f.is_checkmate, f.is_castling, f.is_en_passant, f.fen_after, f.material_white,
-                    f.material_black, f.queens_after, f.legal_moves_before,
-                ))
+            copy.write_row((
+                game_id, facts[0].color, " ".join(f.uci for f in facts), " ".join(f.san for f in facts),
+                "".join(f.piece for f in facts), "".join(f.captured or "." for f in facts),
+                "".join(f.promotion or "." for f in facts),
+                [f.is_check + 2 * f.is_checkmate + 4 * f.is_castling + 8 * f.is_en_passant for f in facts],
+                [f.material_white for f in facts], [f.material_black for f in facts],
+                [f.queens_after for f in facts], [f.legal_moves_before for f in facts],
+            ))
+
+
+def positions(conn: psycopg.Connection, game_ids: Iterable[int]) -> dict[int, list[str]]:
+    """Each game's positions as FENs, replayed from its stored moves: [start, after ply 1, after ply 2, ...].
+    Positions aren't stored (they'd be most of the database); a replay is ~0.3 ms a game."""
+    rows = conn.execute(
+        """SELECT g.id, g.initial_fen, g.chess960, gm.uci FROM games g
+           LEFT JOIN game_moves gm ON gm.game_id = g.id WHERE g.id = ANY(%s)""", (list(set(game_ids)),)).fetchall()
+    out = {}
+    for r in rows:
+        board = chess.Board(r["initial_fen"] or chess.STARTING_FEN, chess960=r["chess960"])
+        fens = [board.fen()]
+        for uci in (r["uci"] or "").split():
+            board.push_uci(uci)
+            fens.append(board.fen())
+        out[r["id"]] = fens
+    return out
+
+
+def attach_fens(conn: psycopg.Connection, rows: list[dict], ply: str = "ply") -> list[dict]:
+    """Sets fen_before and fen_after on rows that carry game_id and a ply (the move), replaying only their games."""
+    games = positions(conn, (r["game_id"] for r in rows))
+    for r in rows:
+        fens = games.get(r["game_id"], [])
+        r["fen_before"] = fens[r[ply] - 1] if 0 < r[ply] <= len(fens) else None
+        r["fen_after"] = fens[r[ply]] if 0 <= r[ply] < len(fens) else None
+    return rows
 
 
 # A game's platform is the prefix of its dedupe key (chesscom:/lichess:), so it also covers games that
@@ -216,6 +285,9 @@ def get_game(conn: psycopg.Connection, game_id: int) -> dict | None:
     game = conn.execute("SELECT * FROM games WHERE id = %s", (game_id,)).fetchone()
     if game:
         game["moves"] = conn.execute("SELECT * FROM moves WHERE game_id = %s ORDER BY ply", (game_id,)).fetchall()
+        fens = positions(conn, [game_id]).get(game_id, [])
+        for m in game["moves"]:
+            m["fen_after"] = fens[m["ply"]]
     return game
 
 
@@ -315,10 +387,10 @@ def list_events(
 ) -> list[dict]:
     """Newest first. `player` = moves played by this username (matched to the event's color);
     `against` = moves played by this username's opponents."""
-    return conn.execute(
+    rows = conn.execute(
         f"""SELECT e.id, e.game_id, e.ply, e.type, e.detector_version, e.color, e.fen, e.metadata,
-                  g.played_at, g.white, g.black, g.result, g.time_control, g.source_key, g.external_id,
-                  m.san, m.uci, m.fen_after
+                  g.played_at, g.white, g.black, g.result, g.time_control, g.source_key, g.external_id, g.chess960,
+                  m.san, m.uci
            FROM events e JOIN games g ON g.id = e.game_id
            JOIN moves m ON m.game_id = e.game_id AND m.ply = e.ply
            WHERE (%(type)s::text IS NULL OR e.type = %(type)s)
@@ -334,6 +406,11 @@ def list_events(
         {"type": type, "color": color, "player": player, "since": since, "until": until,
          "game_id": game_id, "limit": limit, "offset": offset, "platform": platform, "against": against},
     ).fetchall()
+    for r in rows:  # the position after the move: the stored position before it, plus the move
+        board = chess.Board(r["fen"], chess960=r["chess960"])
+        board.push_uci(r["uci"])
+        r["fen_after"] = board.fen()
+    return rows
 
 
 # --- engine analysis (Layer 2) --------------------------------------------------------------------
@@ -535,7 +612,6 @@ def engine_facts_for_moves(conn: psycopg.Connection, config_id: int, moves: list
         return {}
     rows = conn.execute(
         """SELECT k.game_id, k.ply, m.uci, m.color, g.chess960,
-                  coalesce(prev.fen_after, g.initial_fen) AS fen_before,   -- NULL = standard start
                   b.score_cp AS before_cp, b.mate AS before_mate, b.best_uci, b.multipv,
                   a.score_cp AS after_cp, a.mate AS after_mate,
                   q.results AS vs_queen, q.budget AS vs_queen_budget,
@@ -543,7 +619,6 @@ def engine_facts_for_moves(conn: psycopg.Connection, config_id: int, moves: list
            FROM unnest(%(games)s::bigint[], %(plies)s::int[]) AS k(game_id, ply)
            JOIN moves m ON m.game_id = k.game_id AND m.ply = k.ply
            JOIN games g ON g.id = k.game_id
-           LEFT JOIN moves prev ON prev.game_id = k.game_id AND prev.ply = k.ply - 1
            JOIN engine_positions b ON b.config_id = %(config)s AND b.game_id = k.game_id AND b.position = k.ply - 1
            LEFT JOIN engine_positions a ON a.config_id = %(config)s AND a.game_id = k.game_id AND a.position = k.ply
            LEFT JOIN engine_move_probes q ON q.config_id = %(config)s AND q.game_id = k.game_id
@@ -552,7 +627,7 @@ def engine_facts_for_moves(conn: psycopg.Connection, config_id: int, moves: list
                 AND x.position = k.ply - 1 AND x.kind = 'all_moves'""",
         {"games": [g for g, _ in moves], "plies": [p for _, p in moves], "config": config_id},
     ).fetchall()
-    return {(r["game_id"], r["ply"]): r for r in rows}
+    return {(r["game_id"], r["ply"]): r for r in attach_fens(conn, rows)}
 
 
 LICHESS_K = 0.00368208  # Lichess's win% curve, fitted to human games: win = 1 / (1 + exp(-k * cp))
@@ -611,41 +686,42 @@ def engine_label_rows(conn: psycopg.Connection, label: str, config_id: int, blun
         order = f"mv.is_capture OR mv.is_check, {first} - {second} DESC"
     else:
         raise ValueError(f"unknown label {label!r}")
-    return conn.execute(
+    rows = conn.execute(
         f"""WITH mv AS (
               SELECT m.game_id, m.ply, m.color, m.san, m.uci, b.best_uci AS engine_choice,
-                     m.fen_after, prev.fen_after AS fen_before,
                      m.captured IS NOT NULL AS is_capture, m.is_check,
                      -- takes back on the square the opponent just captured on: an "only move" nobody misses
-                     (m.captured IS NOT NULL AND prev.captured IS NOT NULL
-                      AND substr(m.uci, 3, 2) = substr(prev.uci, 3, 2)) AS is_recapture,
+                     (m.captured IS NOT NULL AND m.prev_captured IS NOT NULL
+                      AND substr(m.uci, 3, 2) = substr(m.prev_uci, 3, 2)) AS is_recapture,
                      {_expected(scale, 'm.color', 'b.score_cp', 'b.mate', 'b.wdl')} AS before,
                      {_expected(scale, 'm.color', 'a.score_cp', 'a.mate', 'a.wdl')} AS after,
                      abs(coalesce(b.score_cp, 0) - coalesce(a.score_cp, 0)) AS cp_swing,
                      b.score_cp AS cp_before, b.mate AS mate_before, a.score_cp AS cp_after, a.mate AS mate_after
-              FROM moves m
+              FROM games g0
+              CROSS JOIN LATERAL ({_moves_with_neighbours("g0.id")}) m
               JOIN engine_positions b ON b.config_id = %(config)s AND b.game_id = m.game_id AND b.position = m.ply - 1
               JOIN engine_positions a ON a.config_id = %(config)s AND a.game_id = m.game_id AND a.position = m.ply
-              LEFT JOIN moves prev ON prev.game_id = m.game_id AND prev.ply = m.ply - 1
+              WHERE %(player)s::text IS NULL OR lower(g0.white) = lower(%(player)s) OR lower(g0.black) = lower(%(player)s)
             )
             SELECT %(label)s AS type, %(scale)s AS scale, mv.game_id, mv.ply, mv.color, mv.san, mv.uci,
                    mv.engine_choice, mv.is_capture, mv.is_check, mv.is_recapture,
                    round(mv.before, 3) AS expected_before, round(mv.after, 3) AS expected_after,
                    round(mv.before - mv.after, 3) AS expected_drop {extra_cols},
                    mv.cp_before, mv.mate_before, mv.cp_after, mv.mate_after,
-                   mv.fen_before, mv.fen_after, g.initial_fen,
+                   g.initial_fen,
                    g.played_at, g.white, g.black, g.result, g.source, g.external_id
             FROM mv JOIN games g ON g.id = mv.game_id {extra_join}
             WHERE (%(player)s::text IS NULL
                    OR lower(CASE mv.color WHEN 'w' THEN g.white ELSE g.black END) = lower(%(player)s))
               AND (%(platform)s::text IS NULL OR split_part(g.source_key, ':', 1) = %(platform)s)
               AND {where}
-            ORDER BY {order}
+            ORDER BY {order}, g.played_at DESC NULLS LAST, mv.game_id, mv.ply  -- exact ties are common (every mate is 1.0)
             LIMIT %(limit)s""",
         {"label": label, "scale": scale, "config": config_id, "blunder": blunder, "winning": winning,
          "not_winning": not_winning, "player": player, "limit": limit, "include_recaptures": include_recaptures,
          "platform": platform},
     ).fetchall()
+    return attach_fens(conn, rows)
 
 
 def only_winning_move_candidates(conn: psycopg.Connection, config_id: int, winning: float,
@@ -764,20 +840,15 @@ def engine_input(conn: psycopg.Connection, platform: str, username: str) -> list
         """SELECT g.id, g.played_at, g.white, g.black, g.result, g.initial_fen, g.chess960, g.ply_count,
                   g.external_id, g.source_key,
                   substring(g.pgn from '\\[Termination "([^"]*)"\\]') AS termination,
-                  string_agg(m.uci, ' ' ORDER BY m.ply) AS uci,
-                  string_agg(m.san, ' ' ORDER BY m.ply) AS san,
-                  string_agg(coalesce(m.captured, '.'), '' ORDER BY m.ply) AS captured,
-                  string_agg(coalesce(m.promotion, '.'), '' ORDER BY m.ply) AS promotion,
-                  string_agg((m.is_check::int + 2 * m.is_checkmate::int + 4 * m.is_castling::int)::text, '' ORDER BY m.ply) AS flags,
-                  array_agg(m.material_white ORDER BY m.ply) AS mw,
-                  array_agg(m.material_black ORDER BY m.ply) AS mb,
-                  array_agg(m.legal_moves_before ORDER BY m.ply) AS legal,
+                  gm.uci, gm.san, gm.captured, gm.promotion,
+                  -- per ply: 1 check, 2 checkmate, 4 castling, one digit each (en passant isn't sent)
+                  array_to_string(ARRAY(SELECT f & 7 FROM unnest(gm.flags) WITH ORDINALITY AS u(f, i) ORDER BY i), '') AS flags,
+                  gm.material_white AS mw, gm.material_black AS mb, gm.legal_moves_before AS legal,
                   (SELECT coalesce(json_agg(json_build_array(e.ply, e.type) ORDER BY e.ply), '[]')
                    FROM events e WHERE e.game_id = g.id) AS events
-           FROM games g JOIN moves m ON m.game_id = g.id
+           FROM games g JOIN game_moves gm ON gm.game_id = g.id
            WHERE split_part(g.source_key, ':', 1) = %(platform)s
              AND (lower(g.white) = lower(%(user)s) OR lower(g.black) = lower(%(user)s))
-           GROUP BY g.id
            ORDER BY g.played_at DESC NULLS LAST, g.id DESC""",
         {"platform": platform, "user": username},
     ).fetchall()
@@ -792,12 +863,11 @@ def unusual_move_candidates(conn: psycopg.Connection, config_id: int, player: st
     li = _expected("lichess", "m.color", "b.score_cp", "b.mate", "b.wdl")
     rows = conn.execute(
         f"""SELECT m.game_id, m.ply - 1 AS position
-            FROM moves m
-            JOIN games g ON g.id = m.game_id
+            FROM games g
+            CROSS JOIN LATERAL ({_moves_with_neighbours("g.id")}) m
             JOIN engine_positions b ON b.config_id = %(config)s AND b.game_id = m.game_id AND b.position = m.ply - 1
-            LEFT JOIN moves prev ON prev.game_id = m.game_id AND prev.ply = m.ply - 1
             WHERE m.uci = b.best_uci AND m.legal_moves_before > 1 AND NOT m.is_checkmate
-              AND NOT (m.captured IS NOT NULL AND prev.captured IS NOT NULL AND substr(m.uci, 3, 2) = substr(prev.uci, 3, 2))
+              AND NOT (m.captured IS NOT NULL AND m.prev_captured IS NOT NULL AND substr(m.uci, 3, 2) = substr(m.prev_uci, 3, 2))
               AND {li} >= %(low)s AND {li} < %(high)s
               AND (%(player)s::text IS NULL
                    OR lower(CASE m.color WHEN 'w' THEN g.white ELSE g.black END) = lower(%(player)s))
@@ -852,6 +922,18 @@ def _player_games(alias: str = "g") -> str:
             f"AND (%(player)s::text IS NULL OR lower({alias}.white) = lower(%(player)s) OR lower({alias}.black) = lower(%(player)s))")
 
 
+def _moves_with_neighbours(game_id: str) -> str:
+    """SQL: one game's plies (the moves view), each with the previous ply's facts (prev_*) and the game's last
+    ply (last_*)."""
+    return f"""SELECT mm.*, lag(mm.captured) OVER w AS prev_captured, lag(mm.uci) OVER w AS prev_uci,
+                      lag(mm.is_check) OVER w AS prev_is_check, lag(mm.material_white) OVER w AS prev_material_white,
+                      lag(mm.material_black) OVER w AS prev_material_black,
+                      last_value(mm.is_checkmate) OVER whole AS last_is_checkmate, last_value(mm.color) OVER whole AS last_color
+               FROM moves mm WHERE mm.game_id = {game_id}
+               WINDOW w AS (ORDER BY mm.ply),
+                      whole AS (ORDER BY mm.ply ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)"""
+
+
 def archaeology_moves_sql(scale: str) -> str:
     """One row per move of the player's games with the engine's view before and after it, all from the
     MOVER's side: evaluations (cp/mate, White's POV as stored, plus mover-POV expected score and ordinal),
@@ -875,14 +957,13 @@ def archaeology_moves_sql(scale: str) -> str:
       FROM (
         SELECT m.game_id, m.ply, m.color, m.san, m.uci, m.piece, m.captured, m.promotion, m.is_check,
                m.is_checkmate, m.is_castling, m.legal_moves_before,
-               coalesce(prev.fen_after, g.initial_fen, '{START_FEN}') AS fen_before, m.fen_after,
                b.score_cp AS cp_before, b.mate AS mate_before, b.wdl AS wdl_before,
                a.score_cp AS cp_after, a.mate AS mate_after, a.wdl AS wdl_after,
                b.best_uci AS engine_choice, b.depth AS depth_before,
-               (m.captured IS NOT NULL AND prev.captured IS NOT NULL
-                AND substr(m.uci, 3, 2) = substr(prev.uci, 3, 2)) AS is_recapture,
-               coalesce(prev.is_check, false) AS in_check_before,
-               CASE m.color WHEN 'w' THEN prev.material_black ELSE prev.material_white END AS opp_material_before,
+               (m.captured IS NOT NULL AND m.prev_captured IS NOT NULL
+                AND substr(m.uci, 3, 2) = substr(m.prev_uci, 3, 2)) AS is_recapture,
+               coalesce(m.prev_is_check, false) AS in_check_before,
+               CASE m.color WHEN 'w' THEN m.prev_material_black ELSE m.prev_material_white END AS opp_material_before,
                -- material balance from the mover's side (P1 N3 B3 R5 Q9). Before the move = after it, less
                -- what it captured and what a promotion gained: exact at every ply, set-up starts included
                CASE m.color WHEN 'w' THEN 1 ELSE -1 END * {wb}
@@ -897,18 +978,18 @@ def archaeology_moves_sql(scale: str) -> str:
                -- UNBOUNDED FOLLOWING is recomputed per row: quadratic, 4 s on a 3,700-game history)
                max({wb}) OVER rest AS wb_max_rest, min({wb}) OVER rest AS wb_min_rest,
                lead(m.captured) OVER plies AS reply_captured, lead(m.san) OVER plies AS reply_san,
-               g.ply_count AS last_ply, coalesce(lm.is_checkmate, false) AS game_ends_in_mate, lm.color AS last_mover,
+               g.ply_count AS last_ply, m.last_is_checkmate AS game_ends_in_mate, m.last_color AS last_mover,
                g.played_at, g.white, g.black, g.result, g.source_key, g.external_id,
                split_part(g.source_key, ':', 1) AS platform,
                CASE m.color WHEN 'w' THEN g.white ELSE g.black END AS mover,
                CASE m.color WHEN 'w' THEN g.black ELSE g.white END AS opponent,
                g.termination
         FROM ({_player_games_narrow()}) g
-        JOIN moves m ON m.game_id = g.id
-        LEFT JOIN moves lm ON lm.game_id = g.id AND lm.ply = g.ply_count
+        -- each game's moves unpacked once, with the previous ply and the game's last ply alongside (joining
+        -- the moves view to itself would unpack the game again for every move)
+        CROSS JOIN LATERAL ({_moves_with_neighbours("g.id")}) m
         JOIN engine_positions b ON b.config_id = %(config)s AND b.game_id = m.game_id AND b.position = m.ply - 1
         JOIN engine_positions a ON a.config_id = %(config)s AND a.game_id = m.game_id AND a.position = m.ply
-        LEFT JOIN moves prev ON prev.game_id = m.game_id AND prev.ply = m.ply - 1
         WINDOW plies AS (PARTITION BY m.game_id ORDER BY m.ply),
                rest AS (PARTITION BY m.game_id ORDER BY m.ply DESC ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING)
       ) r
@@ -943,9 +1024,9 @@ def archaeology_positions_sql(scale: str) -> str:
                  {_pov_ordinal('pov', 'stm', 'p.score_cp', 'p.mate')} AS ord,
                  lead({_pov_expected(scale, 'pov', 'stm', 'p.score_cp', 'p.mate', 'p.wdl')})
                    OVER (PARTITION BY p.game_id ORDER BY p.position) AS next_exp,
-                 nm.uci AS next_uci
+                 nullif(split_part(nm.uci, ' ', p.position + 1), '') AS next_uci
           FROM (SELECT g.*, {pov} AS pov FROM games g WHERE {_player_games()} AND %(player)s::text IS NOT NULL) g
           JOIN engine_positions p ON p.config_id = %(config)s AND p.game_id = g.id
           CROSS JOIN LATERAL (SELECT {stm} AS stm) s
-          LEFT JOIN moves nm ON nm.game_id = p.game_id AND nm.ply = p.position + 1
+          LEFT JOIN game_moves nm ON nm.game_id = p.game_id
         ) x"""

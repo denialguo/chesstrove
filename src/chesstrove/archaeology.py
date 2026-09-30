@@ -123,7 +123,9 @@ def _moves(conn: psycopg.Connection, q: dict, p: Params, where: str, order: str,
     sql = (f"SELECT mv.* {extra_cols} FROM ({db.archaeology_moves_sql(p.scale)}) mv {extra_join} "
            f"WHERE lower(mv.mover) = lower(%(player)s) AND {where} ORDER BY {order}"
            + (" LIMIT %(limit)s" if limit else ""))
-    return conn.execute(sql, {**q, **asdict(p)}).fetchall()
+    rows = conn.execute(sql, {**q, **asdict(p)}).fetchall()
+    # positions aren't stored; replay the few games shown (unlimited callers pick first, then attach_fens)
+    return db.attach_fens(conn, rows) if limit else rows
 
 
 STABLE = "mv.played_at DESC NULLS LAST, mv.game_id, mv.ply"  # final tie-break: newest first, then position
@@ -176,7 +178,6 @@ def _game_extreme(conn, q, p, config, won: bool):
                    split_part(g.source_key, ':', 1) AS platform,
                    substring(g.pgn from '\\[Termination "([^"]*)"\\]') AS termination,
                    m.san AS into_san, m.uci AS into_uci, m.color AS into_color,
-                   coalesce(m.fen_after, g.initial_fen, '{db.START_FEN}') AS fen,
                    (SELECT min(later.position) FROM pos later WHERE later.game_id = pick.game_id
                       AND later.position > pick.position AND later.trusted AND later.ord > 90000) AS later_forced_mate_at
             FROM pick JOIN games g ON g.id = pick.game_id
@@ -189,8 +190,10 @@ def _game_extreme(conn, q, p, config, won: bool):
             LIMIT %(limit)s""",
         {**q, **asdict(p)},
     ).fetchall()
+    games = db.positions(conn, (r["game_id"] for r in rows))
     out = []
     for r in rows:
+        r["fen"] = games[r["game_id"]][r["position"]]
         player = r["white"] if r["pov"] == "w" else r["black"]
         out.append({
             "game": _game(r),
@@ -303,11 +306,7 @@ def underpromotion(conn, q, p, config):
 
 
 def _fen_before(conn, game_id: int, ply: int) -> str:
-    row = conn.execute(
-        """SELECT coalesce(prev.fen_after, g.initial_fen, %s) AS fen FROM games g
-           LEFT JOIN moves prev ON prev.game_id = g.id AND prev.ply = %s WHERE g.id = %s""",
-        (db.START_FEN, ply - 1, game_id)).fetchone()
-    return row["fen"]
+    return db.positions(conn, [game_id])[game_id][ply - 1]
 
 
 # --- 6. SOUND MATERIAL SACRIFICE ----------------------------------------------------------------------
@@ -376,7 +375,9 @@ def material_sacrifice(conn, q, p, config):
             found.append((r, sac))
     order = {"queen": 0, "rook": 1, "exchange": 2}
     found.sort(key=lambda x: (not x[1]["ends_in_mate"], order[x[1]["kind"]], -x[1]["deficit"], -float(x[0]["exp_after"])))
-    return [{**_move_evidence(r, config, "sacrifice", sac["kind"]), "sacrifice": sac} for r, sac in found[: q["limit"]]]
+    found = found[: q["limit"]]
+    db.attach_fens(conn, [r for r, _ in found])
+    return [{**_move_evidence(r, config, "sacrifice", sac["kind"]), "sacrifice": sac} for r, sac in found]
 
 
 # --- 7. FORCED MATES ------------------------------------------------------------------------------------
@@ -421,6 +422,7 @@ def longest_mate_found(conn, q, p, config):
             LIMIT %(limit)s""",
         {**q, **asdict(p)},
     ).fetchall()
+    db.attach_fens(conn, rows)
     out = []
     for r in rows:
         ev = _move_evidence(r, config, "mate_length", r["mate_length"])
@@ -471,15 +473,19 @@ def unusual_move(conn, q, p, config):
     rows = _moves(conn, q, p, f"{_gap_sql(p)} >= %(unusual_min_gap)s AND NOT mv.is_recapture AND NOT mv.is_checkmate "
                               f"AND NOT coalesce({mate2} < 0, false)",
                   STABLE, join, cols, limit=False)
-    scored = []
+    ranked = []
     for r in rows:
         gap = round(float(r["line1_exp"] - r["line2_exp"]), 3)
-        ev = _with_runner_up(_move_evidence(r, config, "unusualness", 0.0), r)
-        ev["score"]["value"] = unusualness(ev["move_class"], gap, p)
+        ranked.append((unusualness(_move_class(r), gap, p), gap, r))
+    ranked.sort(key=lambda x: (-x[0], -x[1]))
+    ranked = ranked[: q["limit"]]
+    db.attach_fens(conn, [r for _, _, r in ranked])  # positions only for what's shown
+    out = []
+    for score, gap, r in ranked:
+        ev = _with_runner_up(_move_evidence(r, config, "unusualness", score), r)
         ev["gap"] = gap
-        scored.append(ev)
-    scored.sort(key=lambda e: (-e["score"]["value"], -e["gap"]))
-    return scored[: q["limit"]]
+        out.append(ev)
+    return out
 
 
 _TYPES = {"biggest_throw": biggest_throw, "biggest_comeback": biggest_comeback, "lost_advantage": lost_advantage,
