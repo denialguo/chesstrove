@@ -17,7 +17,7 @@ interface Shown {
   bad?: boolean; // a moment that went wrong: the plate goes flag red
 }
 
-const CARDS: { type: DiscoveryType; title: string; empty: string }[] = [
+export const CARDS: { type: DiscoveryType; title: string; empty: string }[] = [
   { type: "biggest_comeback", title: "Biggest comeback", empty: "No won game came back from a losing position yet." },
   { type: "biggest_throw", title: "Biggest throw", empty: "Nothing thrown away yet." },
   { type: "only_winning_move", title: "Only winning moves found", empty: "No only-moves found yet." },
@@ -103,8 +103,9 @@ function rowValue(type: DiscoveryType, d: Discovery) {
 
 const gameLink = (d: Discovery) => `/g/${d.game.id}?ply=${d.ply}${d.color === "b" ? "&o=black" : ""}`;
 
-export function RecordBook({ platform, username, name, games, engine }: {
-  platform: Platform; username: string; name: string; games: number; engine: string;
+/** The record book from ChessTrove's own (native) engine index: players it analysed server-side. */
+export function RecordBook({ platform, username, games, engine }: {
+  platform: Platform; username: string; games: number; engine: string;
 }) {
   return (
     <section className="records" aria-labelledby="records-title">
@@ -113,18 +114,23 @@ export function RecordBook({ platform, username, name, games, engine }: {
         <p>{engine} read every position of all {plural(games, "game")}. These are the moments it singles out; each opens at the exact move.</p>
       </div>
       <div className="records__grid">
-        {CARDS.map((c) => <Card key={c.type} {...c} platform={platform} username={username} name={name} />)}
+        {CARDS.map((c) => <ServerCard key={c.type} {...c} platform={platform} username={username} />)}
       </div>
     </section>
   );
 }
 
-function Card({ type, title, empty, platform, username }: {
-  type: DiscoveryType; title: string; empty: string; platform: Platform; username: string; name: string;
+function ServerCard({ type, title, empty, platform, username }: {
+  type: DiscoveryType; title: string; empty: string; platform: Platform; username: string;
 }) {
   const [rows, setRows] = useState<Discovery[] | null>(null);
   useEffect(() => { api.discoveries(platform, username, type).then((r) => setRows(r.results)).catch(() => setRows([])); },
     [platform, username, type]);
+  return <Card type={type} title={title} empty={empty} rows={rows} />;
+}
+
+/** One discovery type: the top find with its board and evidence, the next few as rows. */
+export function Card({ type, title, empty, rows }: { type: DiscoveryType; title: string; empty: string; rows: Discovery[] | null }) {
   const [top, ...rest] = rows ?? [];
   const shown = top && present(type, top);
   return (

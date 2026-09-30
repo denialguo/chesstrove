@@ -321,6 +321,21 @@ button.plunger:hover { background: var(--brass-hi); }
 
 /* ---------- the record book (engine archaeology) ---------- */
 .records { margin-top: var(--space-8); }
+.engine-offer__go { display: grid; grid-template-columns: auto 1fr; gap: var(--space-5); align-items: center; margin-bottom: var(--space-5); }
+.engine-offer__go p { margin: 0; color: var(--on-walnut-2); font-size: 0.9rem; max-width: 52ch; }
+.engine-status { display: grid; gap: var(--space-3); }
+.engine-status p { margin: 0; }
+.engine-status__line { font-weight: 600; }
+.engine-status__error { color: var(--flag-soft); }
+.engine-status__note { color: var(--on-walnut-3); font-size: 0.85rem; max-width: var(--measure); }
+.engine-status__controls { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-4); }
+.engine-status__controls .seg { margin-bottom: 0; }
+.engine-btn { border: 1px solid var(--walnut-edge); background: transparent; color: var(--on-walnut); cursor: pointer; font-weight: 600;
+  font-size: 0.85rem; padding: 0.4rem 1rem; border-radius: 999px; }
+.engine-btn:hover { border-color: var(--brass); }
+.engine-btn--go { background: var(--brass); border-color: var(--brass); color: var(--dial); }
+.engine-btn--go:hover { background: var(--brass-hi); }
+@media (max-width: 640px) { .engine-offer__go { grid-template-columns: 1fr; justify-items: start; } }
 .records__grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-5); }
 .record {
   background: var(--walnut-deep); border-radius: 1.2rem; padding: var(--space-5); min-width: 0;

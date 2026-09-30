@@ -5,6 +5,7 @@ import { Board } from "../components/Board";
 import { Dial } from "../components/Dial";
 import { Digits } from "../components/Digits";
 import { RecordBook } from "../components/RecordBook";
+import { EngineRecordBook } from "../components/EngineRecordBook";
 import { TopBar } from "../components/TopBar";
 import { api, type Motif, ApiError, PLATFORM_NAME, type EventRow, type Platform, type PlayerSummary } from "../lib/api";
 import { formatDate, formatMonth, moveLabel, n, plural } from "../lib/format";
@@ -166,13 +167,15 @@ export function Player() {
         </section>
       )}
 
-      {summary.engine?.games_analyzed ? (
-        <RecordBook platform={platform} username={username} name={name} games={summary.games}
+      {summary.engine?.games_analyzed && new URLSearchParams(location.search).get("engine") !== "browser" ? (
+        <RecordBook platform={platform} username={username} games={summary.games}
           engine={`${summary.engine.config.engine_name} (${n(summary.engine.config.limit_value)} ${summary.engine.config.limit_kind} a position)`} />
-      ) : (
+      ) : running ? (
         <section className="records"><div className="section-head"><h2>The record book</h2>
-          <p>Stockfish hasn’t analyzed these games yet. The collection above doesn’t need it.</p></div></section>
-      )}
+          <p>Once the import finishes, Stockfish can read these games for the record book. The collection above doesn’t need it.</p></div></section>
+      ) : summary.games > 0 ? (
+        <EngineRecordBook platform={platform} username={username} positions={summary.positions} />
+      ) : null}
     </Shell>
   );
 }
