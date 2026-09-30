@@ -1,11 +1,9 @@
 import { StrictMode, Suspense, lazy } from "react";
 import { createRoot } from "react-dom/client";
 import { BrowserRouter, Route, Routes } from "react-router-dom";
-import "@fontsource/big-shoulders-display/700";
-import "@fontsource/big-shoulders-display/800";
-import "@fontsource-variable/hanken-grotesk";
-import "@fontsource/martian-mono/400";
-import "@fontsource/martian-mono/600";
+import "@fontsource-variable/source-serif-4/opsz.css";
+import "@fontsource-variable/source-sans-3";
+import "@fontsource-variable/source-code-pro";
 import "chessground/assets/chessground.base.css";
 import "chessground/assets/chessground.cburnett.css";
 import "./styles.css";

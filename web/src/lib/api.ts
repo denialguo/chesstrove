@@ -3,7 +3,7 @@
 export type Platform = "chesscom" | "lichess";
 export const PLATFORM_NAME: Record<Platform, string> = { chesscom: "Chess.com", lichess: "Lichess" };
 
-export interface Motif { type: string; mine: number; against: number; forms?: Partial<Record<"textbook" | "canonical" | "variant", number>> }
+export interface Motif { type: string; mine: number; against: number; forms?: Partial<Record<"textbook" | "characteristic" | "variant", number>> }
 export interface Import {
   id: number; status: "running" | "completed" | "failed"; finished_at: string | null; games_expected: number | null; games_seen: number; games_imported: number;
   games_duplicate: number; games_failed: number; games_skipped: number; errors: { error: string }[];
@@ -12,7 +12,7 @@ export interface PlayerSummary {
   platform: Platform; username: string; display_name: string | null; games: number; positions: number;
   first_game: string | null; last_game: string | null; wins: number; draws: number; losses: number;
   rating: number | null; rating_mode?: string | null; motifs: Motif[];
-  /** Distinct moves matching at least one rare pattern (named mates as Classic or Core), per side; `types` counts
+  /** Distinct moves matching at least one rare pattern (named mates in textbook or characteristic form; variants are left out), per side; `types` counts
    *  the labels on those moves, so they overlap. */
   rare_moments: { mine: number; against: number; types: { type: string; mine: number; against: number }[] };
   best_underpromotions?: { total: number; judged: number; mine: number; against: number; found: string[] } | null;

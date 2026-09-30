@@ -659,7 +659,7 @@ def only_winning_move_candidates(conn: psycopg.Connection, config_id: int, winni
 RARE_MOMENT_TYPES = [d.id for d in DETECTORS if d.id != "MISSED_MATE_IN_ONE"]
 # Named mates count in these forms only; variants are deliberately loose while they're under review.
 RARE_MOMENT_NAMED_TYPES = [d.id for d in NAMED_MATES]
-RARE_MOMENT_FORMS = ["textbook", "canonical"]
+RARE_MOMENT_FORMS = ["textbook", "characteristic"]
 
 def player_summary(conn: psycopg.Connection, platform: str, username: str) -> dict:
     """Everything a player page needs in one round of queries. Motif counts are split by who played the
@@ -686,10 +686,10 @@ def player_summary(conn: psycopg.Connection, platform: str, username: str) -> di
         f"""SELECT e.type,
                    count(*) FILTER (WHERE lower(CASE e.color WHEN 'w' THEN g.white ELSE g.black END) = lower(%(user)s)) AS mine,
                    count(*) FILTER (WHERE lower(CASE e.color WHEN 'w' THEN g.white ELSE g.black END) <> lower(%(user)s)) AS against,
-                   -- named mates only: the player's own, by form (textbook / canonical / variant)
+                   -- named mates only: the player's own, by form (textbook / characteristic / variant)
                    jsonb_strip_nulls(jsonb_build_object(
                        'textbook', nullif(count(*) FILTER (WHERE e.metadata->>'form' = 'textbook' AND lower(CASE e.color WHEN 'w' THEN g.white ELSE g.black END) = lower(%(user)s)), 0),
-                       'canonical', nullif(count(*) FILTER (WHERE e.metadata->>'form' = 'canonical' AND lower(CASE e.color WHEN 'w' THEN g.white ELSE g.black END) = lower(%(user)s)), 0),
+                       'characteristic', nullif(count(*) FILTER (WHERE e.metadata->>'form' = 'characteristic' AND lower(CASE e.color WHEN 'w' THEN g.white ELSE g.black END) = lower(%(user)s)), 0),
                        'variant', nullif(count(*) FILTER (WHERE e.metadata->>'form' = 'variant' AND lower(CASE e.color WHEN 'w' THEN g.white ELSE g.black END) = lower(%(user)s)), 0)
                    )) AS forms
             FROM events e JOIN games g ON g.id = e.game_id WHERE {mine}

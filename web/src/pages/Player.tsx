@@ -9,7 +9,7 @@ import { EngineRecordBook } from "../components/EngineRecordBook";
 import { TopBar } from "../components/TopBar";
 import { api, type Motif, ApiError, PLATFORM_NAME, type EventRow, type Platform, type PlayerSummary } from "../lib/api";
 import { formatDate, formatMonth, moveLabel, n, plural, roughDuration } from "../lib/format";
-import { BEST_UNDERPROMOTION, COUNTED, FORM_NAME, MOTIFS, NAMED_MATES, formNote, type MateForm, type MotifInfo } from "../lib/motifs";
+import { BEST_UNDERPROMOTION, COUNTED, FORM_HELP, FORM_NAME, MATE_FORMS, MOTIFS, NAMED_MATES, formBadge, formNote, type MotifInfo } from "../lib/motifs";
 import { supported } from "../engine/runner";
 import { checkUnderpromotions, savedVerdicts, type UpVerdict } from "../engine/underpromotions";
 
@@ -129,9 +129,6 @@ export function Player() {
             who="by their opponents" examples={examples(rare.types, "against")} />
         </div>
         <div className="case__plate" aria-live="polite">
-          <p className="case__explain">
-            Unusual moves found without an engine. Each move counts once.
-          </p>
           <p>
             {running
               ? `Importing from ${PLATFORM_NAME[platform]}${expected ? `: ${n(summary.games)} of ${platform === "chesscom" ? "about " : ""}${n(expected)} read so far` : ""}${importLeft ? `, ${importLeft} left` : ""}. Motifs appear as games arrive; you can leave and come back.`
@@ -167,7 +164,7 @@ export function Player() {
         <section className="ledger ledger--named" aria-labelledby="named-title">
           <div className="section-head">
             <h2 id="named-title">Mating patterns</h2>
-            <p>By {name} on the left, opponents on the right. Open a mate for its positions and forms.</p>
+            <p>By {name} on the left, opponents on the right. Inside, <em>Textbook</em> marks a mate that looks like the familiar diagram and <em>Variant</em> one with bigger differences.</p>
           </div>
           <ul className="ledger__rows">
             {namedFound.map(({ m, counts }) => (
@@ -230,8 +227,7 @@ function Shell({ children }: { children: React.ReactNode }) {
 function MotifRow({ motif, mine, against, forms, platform, username, name }: {
   motif: MotifInfo; mine: number; against: number; forms?: Motif["forms"]; platform: Platform; username: string; name: string;
 }) {
-  const breakdown = forms && (["textbook", "canonical", "variant"] as MateForm[])
-    .filter((f) => forms[f]).map((f) => `${forms[f]} ${FORM_NAME[f].toLowerCase()}`).join(" · ");
+  const breakdown = forms && MATE_FORMS.filter((f) => forms[f]).map((f) => `${forms[f]} ${FORM_NAME[f].toLowerCase()}`).join(" · ");
   const [open, setOpen] = useState(false);
   const [side, setSide] = useState<"mine" | "against">(mine > 0 || against === 0 ? "mine" : "against");
   const empty = mine === 0 && against === 0;
@@ -378,9 +374,10 @@ function Specimens({ platform, username, type, side, only }: {
                 check={r.san.includes("+") || r.san.includes("#")} label={`${moveLabel(r.ply, r.san, r.color)} against ${opponent}`} />
               <span className="specimen__move">{moveLabel(r.ply, r.san, r.color)}</span>
               <span className="specimen__meta">vs {opponent} · {formatDate(r.played_at)}</span>
-              {form && (
+              {form && formBadge(form.form) && (
                 <span className="specimen__form">
-                  <span className="form-tag">{FORM_NAME[form.form]} form.</span> {form.note}
+                  <span className={`form-tag form-tag--${form.form}`} title={FORM_HELP[form.form]}>{formBadge(form.form)}</span>
+                  {form.form === "variant" && form.note && <> {form.note}</>}
                 </span>
               )}
             </Link>

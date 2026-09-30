@@ -6,7 +6,7 @@ import { Digits } from "../components/Digits";
 import { TopBar } from "../components/TopBar";
 import { api, PLATFORM_NAME, sourceUrl, type EnginePosition, type GameDetail, type Platform } from "../lib/api";
 import { formatDate, moveLabel, timeControl } from "../lib/format";
-import { FORM_NAME, formNote, motifInfo } from "../lib/motifs";
+import { FORM_HELP, formBadge, formNote, motifInfo } from "../lib/motifs";
 
 const START = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
 
@@ -140,8 +140,8 @@ export function Game() {
                     <button type="button" onClick={() => go(e.ply)}>
                       <span className="glyph">{motifInfo(e.type)?.glyph ?? "•"}</span>
                       <span>{motifInfo(e.type)?.name ?? e.type}
-                        {formNote(e.metadata) && <> <span className="form-tag"
-                          title={formNote(e.metadata)!.note || undefined}>· {FORM_NAME[formNote(e.metadata)!.form]} form</span></>}
+                        {formNote(e.metadata) && formBadge(formNote(e.metadata)!.form) && <> <span className={`form-tag form-tag--${formNote(e.metadata)!.form}`}
+                          title={[FORM_HELP[formNote(e.metadata)!.form], formNote(e.metadata)!.note].filter(Boolean).join(" ")}>{formBadge(formNote(e.metadata)!.form)}</span></>}
                       </span>
                       <span className="found__move">{moveLabel(e.ply, e.san, e.color)}</span>
                     </button>

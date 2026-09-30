@@ -25,12 +25,12 @@ def summary(conn):
     for t in ("UNDERPROMOTION", "PROMOTION_CHECKMATE", "SMOTHERED_MATE"):
         label(a, 1, "w", t)                            # one move, three labels
     label(a, 3, "w", "BACK_RANK_MATE")
-    label(a, 3, "w", "OPERA_MATE", "textbook")         # core + named mate on one move
+    label(a, 3, "w", "OPERA_MATE", "textbook")         # back-rank + named mate on one move
     label(a, 5, "w", "DOUBLE_CHECK")                   # a third moment in the same game
     label(a, 7, "w", "MISSED_MATE_IN_ONE")             # a mistake, not a rare moment
     label(a, 9, "w", "BLUNDER")                        # engine labels never count
     label(a, 9, "w", "ONLY_WINNING_MOVE")
-    label(a, 11, "w", "ARABIAN_MATE", "canonical")     # a named mate on its own
+    label(a, 11, "w", "ARABIAN_MATE", "characteristic")  # a named mate on its own
     label(a, 13, "w", "EPAULETTE_MATE", "variant")     # variants are left out
     label(a, 15, "w", "BODEN_MATE")                    # named mates without a grade are left out
     # game b: alice is Black; bob's move is against her
@@ -66,3 +66,23 @@ def test_collection_counts_unchanged(summary):
     assert motifs["MISSED_MATE_IN_ONE"] == (1, 0)
     assert motifs["EPAULETTE_MATE"] == (1, 0)
     assert motifs["BACK_RANK_MATE"] == (1, 1)
+
+
+def test_forms_breakdown_uses_the_new_names(summary):
+    forms = {m["type"]: m["forms"] for m in summary["motifs"]}
+    assert forms["OPERA_MATE"] == {"textbook": 1}
+    assert forms["ARABIAN_MATE"] == {"characteristic": 1}
+    assert forms["EPAULETTE_MATE"] == {"variant": 1}
+
+
+def test_old_canonical_rows_are_migrated_and_still_count(conn, summary):
+    before = summary["rare_moments"]["mine"]
+    conn.execute("UPDATE events SET metadata = '{\"form\": \"canonical\"}' WHERE type = 'ARABIAN_MATE'")
+    conn.execute("UPDATE events SET metadata = '{\"form\": \"variant\"}' WHERE type = 'OPERA_MATE'")
+    db.init_schema(conn)
+    forms = {r["type"]: r["form"] for r in conn.execute(
+        "SELECT type, metadata->>'form' AS form FROM events WHERE metadata ? 'form'").fetchall()}
+    assert forms == {"ARABIAN_MATE": "characteristic", "OPERA_MATE": "variant",
+                     "EPAULETTE_MATE": "variant", "LADDER_MATE": "textbook"}
+    # the Opera move also carries BACK_RANK_MATE, so it stays a rare moment; the Arabian one is unchanged
+    assert db.player_summary(conn, "sha256", "alice")["rare_moments"]["mine"] == before

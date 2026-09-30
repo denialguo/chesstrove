@@ -21,9 +21,9 @@
   --sq-light: #f6f5f0;
   --sq-dark: #b39277;
 
-  --display: "Big Shoulders Display", "Arial Narrow", sans-serif;
-  --text: "Hanken Grotesk Variable", system-ui, sans-serif;
-  --mono: "Martian Mono", ui-monospace, monospace;
+  --display: "Source Serif 4 Variable", Georgia, serif;
+  --text: "Source Sans 3 Variable", system-ui, sans-serif;
+  --mono: "Source Code Pro Variable", ui-monospace, monospace;
 
   --space-1: 0.25rem;
   --space-2: 0.5rem;
@@ -52,7 +52,6 @@ body {
   font-family: var(--text);
   font-size: 1.0625rem;
   line-height: 1.55;
-  font-feature-settings: "ss01";
   -webkit-font-smoothing: antialiased;
   caret-color: var(--brass-hi);
 }
@@ -71,7 +70,7 @@ button { font: inherit; color: inherit; }
 h1, h2, h3 { text-wrap: balance; }
 p { text-wrap: pretty; }
 
-.num, .digits { font-variant-numeric: tabular-nums; }
+.num, .digits { font-variant-numeric: tabular-nums lining-nums; }
 
 .page { min-height: 100dvh; display: flex; flex-direction: column; }
 .page main { flex: 1; width: min(100% - 2rem, 76rem); margin-inline: auto; padding-bottom: var(--space-8); }
@@ -83,8 +82,8 @@ p { text-wrap: pretty; }
 }
 .wordmark {
   display: inline-flex; align-items: center; gap: var(--space-2);
-  font-family: var(--display); font-weight: 800; font-size: 1.6rem; letter-spacing: 0.01em;
-  text-decoration: none; text-transform: uppercase;
+  font-family: var(--display); font-weight: 650; font-size: 1.5rem; letter-spacing: -0.005em;
+  text-decoration: none;
 }
 .wordmark__mark { width: 30px; height: 30px; }
 .wordmark__dial { fill: var(--enamel); }
@@ -194,7 +193,7 @@ button.plunger:hover { background: var(--brass-hi); }
 .dial--board .board { width: 100%; box-shadow: 0 0 0 2px var(--dial); }
 
 .face { display: grid; justify-items: center; text-align: center; gap: 0.3rem; color: var(--dial); }
-.face__count { font-family: var(--display); font-weight: 800; font-size: clamp(3rem, 22cqi, 7.5rem); line-height: 0.9; letter-spacing: 0.01em; }
+.face__count { font-family: var(--display); font-weight: 600; font-size: clamp(3rem, 22cqi, 7.5rem); line-height: 1; letter-spacing: -0.02em; }
 .face__label { font-size: clamp(0.75rem, 4cqi, 0.95rem); font-weight: 600; color: var(--dial-2); max-width: 20ch; line-height: 1.3; min-height: 2.6em; }
 
 .digits { display: inline-flex; }
@@ -215,8 +214,8 @@ button.plunger:hover { background: var(--brass-hi); }
 /* ---------- landing ---------- */
 .hero { padding-top: clamp(1rem, 3vw, 2rem); }
 .hero__title {
-  font-family: var(--display); font-weight: 800; text-transform: uppercase; text-align: center;
-  font-size: clamp(1.8rem, 2.6vw, 2.5rem); line-height: 0.95; letter-spacing: 0.005em;
+  font-family: var(--display); font-weight: 600; text-align: center;
+  font-size: clamp(2rem, 3vw, 2.8rem); line-height: 1.1; letter-spacing: -0.01em;
   margin: 0 auto; max-width: 50rem;
 }
 .hero__intro { margin: var(--space-3) auto 0; max-width: 46ch; text-align: center; color: var(--on-walnut-2); }
@@ -229,7 +228,7 @@ button.plunger:hover { background: var(--brass-hi); }
 
 .vocab { margin-top: var(--space-7); display: grid; grid-template-columns: minmax(0, 16rem) 1fr; gap: var(--space-7); }
 .vocab__intro h2, .section-head h2 {
-  font-family: var(--text); font-weight: 700; font-size: 1.4rem;
+  font-family: var(--display); font-weight: 600; font-size: 1.6rem; letter-spacing: -0.01em;
   line-height: 1.2; margin: 0;
 }
 .vocab__intro p { color: var(--on-walnut-2); margin: var(--space-3) 0 0; font-size: 0.95rem; }
@@ -255,15 +254,14 @@ button.plunger:hover { background: var(--brass-hi); }
 /* ---------- player ---------- */
 .player-head { padding-top: var(--space-5); }
 .player-head__name {
-  font-family: var(--display); font-weight: 800; text-transform: uppercase; margin: 0; line-height: 0.9;
-  font-size: clamp(2.6rem, 6vw, 4.4rem); overflow-wrap: anywhere;
+  font-family: var(--display); font-weight: 600; margin: 0; line-height: 1.05; letter-spacing: -0.015em;
+  font-size: clamp(2.4rem, 5.5vw, 4rem); overflow-wrap: anywhere;
 }
 .player-head__meta { margin: var(--space-3) 0 0; color: var(--on-walnut-2); }
 .case--player { margin: 2.8rem 0 0; max-width: 60rem; }
 .case--player .case__body { align-items: center; }
 .case--player .case__plate { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: var(--space-2) var(--space-5); margin-top: var(--space-4); padding-top: var(--space-4); border-top: 1px solid var(--walnut-rule); text-align: left; max-width: none; }
 .case--player .case__plate p { margin: 0; }
-.case__explain { color: var(--on-walnut-3); font-size: 0.85rem; max-width: 46ch; }
 .tally { display: grid; grid-template-columns: 8.5rem 1fr; gap: var(--space-4); align-items: center; }
 .dial--tally .dial__content { inset: 14%; }
 .dial--tally .face__count { font-size: 30cqi; }
@@ -291,7 +289,7 @@ button.plunger:hover { background: var(--brass-hi); }
 }
 .ledger__summary:hover:not(:disabled) { background: rgb(255 255 255 / 0.035); }
 .ledger__summary:disabled { cursor: default; }
-.ledger__count { font-family: var(--display); font-weight: 800; font-size: 2.4rem; line-height: 1; color: var(--brass-hi); }
+.ledger__count { font-family: var(--display); font-weight: 600; font-size: 2rem; line-height: 1; color: var(--brass-hi); }
 .ledger__count--against { color: var(--on-walnut-2); justify-self: end; }
 .ledger__motif { display: grid; grid-template-columns: 4.6rem 1fr; gap: var(--space-4); align-items: baseline; }
 .ledger__motif .glyph { font-size: 1.1rem; }
@@ -310,7 +308,7 @@ button.plunger:hover { background: var(--brass-hi); }
 .ledger__chev { position: absolute; right: 0.4rem; top: 50%; translate: 0 -50%; color: var(--on-walnut-3); transition: rotate 200ms var(--ease-out); display: none; }
 .ledger__row--open .ledger__chev { rotate: 180deg; }
 .ledger--named { margin-top: var(--space-7); }
-.ledger--named .ledger__count { font-size: 1.7rem; }
+.ledger--named .ledger__count { font-size: 1.5rem; }
 .ledger--named .ledger__summary { padding-block: var(--space-3); }
 .ledger__panel { padding: 0 var(--space-4) var(--space-6); }
 
@@ -326,7 +324,9 @@ button.plunger:hover { background: var(--brass-hi); }
 .specimen__move { font-family: var(--mono); font-weight: 600; font-size: 0.85rem; }
 .specimen__meta { font-size: 0.8rem; color: var(--on-walnut-3); margin-top: -0.2rem; }
 .specimen__form { font-size: 0.78rem; line-height: 1.35; color: var(--on-walnut-2); }
-.form-tag { font-family: var(--text); font-size: 0.78rem; font-weight: 600; color: var(--on-walnut-3); }
+.form-tag { font-family: var(--text); font-size: 0.74rem; font-weight: 600; letter-spacing: 0.02em; color: var(--on-walnut-3); }
+.form-tag--textbook { color: var(--brass-hi); }
+.specimen__form .form-tag { display: block; }
 .ledger__forms { margin: 0 0 var(--space-3); font-size: 0.8rem; color: var(--on-walnut-3); }
 
 
@@ -341,7 +341,7 @@ button.plunger:hover { background: var(--brass-hi); }
 .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .tag { display: inline-block; font-size: 0.75rem; font-weight: 700; padding: 0.05rem 0.45rem; margin-right: 0.35rem; border-radius: 999px; background: var(--enamel); color: var(--dial); }
 .empty { padding-top: var(--space-8); max-width: 40rem; }
-.empty h1 { font-family: var(--display); font-weight: 800; text-transform: uppercase; font-size: clamp(2.2rem, 5vw, 3.6rem); line-height: 0.95; margin: 0; }
+.empty h1 { font-family: var(--display); font-weight: 600; font-size: clamp(2rem, 4.5vw, 3.2rem); line-height: 1.1; margin: 0; }
 .empty p { color: var(--on-walnut-2); }
 
 /* ---------- the record book (engine archaeology) ---------- */
@@ -371,7 +371,7 @@ button.plunger:hover { background: var(--brass-hi); }
 .record__head h3 { margin: 0; font-size: 1.1rem; }
 /* The engine's readouts are quieter than the physical dials and player plates. */
 .record__value {
-  font-family: var(--display); font-weight: 800; font-size: 1.6rem; line-height: 1; white-space: nowrap;
+  font-family: var(--display); font-weight: 600; font-size: 1.45rem; line-height: 1; white-space: nowrap;
   color: var(--on-walnut-2);
   font-variant-numeric: tabular-nums;
 }
@@ -397,7 +397,7 @@ button.plunger:hover { background: var(--brass-hi); }
 
 /* ---------- game viewer ---------- */
 .game-head { padding-top: var(--space-5); }
-.game-head__title { font-family: var(--display); font-weight: 800; text-transform: uppercase; font-size: clamp(2rem, 5vw, 3.6rem); line-height: 0.95; margin: 0; overflow-wrap: anywhere; }
+.game-head__title { font-family: var(--display); font-weight: 600; letter-spacing: -0.015em; font-size: clamp(2rem, 4.5vw, 3.2rem); line-height: 1.05; margin: 0; overflow-wrap: anywhere; }
 .game-head__vs { color: var(--on-walnut-3); font-family: var(--text); font-size: 0.5em; text-transform: none; font-weight: 400; }
 .game-head__meta { color: var(--on-walnut-2); margin: var(--space-3) 0 0; }
 
@@ -414,7 +414,7 @@ button.plunger:hover { background: var(--brass-hi); }
 .plate__pin { fill: var(--dial); }
 .plate__hand { transform-origin: 16px 16px; }
 .plate--to-move .plate__hand { animation: sweep 6s linear infinite; }
-.plate__rating { font-family: var(--display); font-weight: 800; font-size: 1.35rem; line-height: 1; padding: 0.2rem 0.45rem 0.15rem; border-radius: 6px; background: var(--enamel); color: var(--dial); }
+.plate__rating { font-family: var(--display); font-weight: 600; font-size: 1.2rem; font-variant-numeric: tabular-nums lining-nums; line-height: 1; padding: 0.2rem 0.45rem 0.15rem; border-radius: 6px; background: var(--enamel); color: var(--dial); }
 .plate:not(.plate--to-move) .plate__rating { background: var(--walnut-deep); color: var(--on-walnut-2); }
 .evalbar { position: relative; width: 0.7rem; background: var(--dial); border-radius: 4px; overflow: hidden; margin-block: 2.1rem; }
 .evalbar__white { position: absolute; inset: 0; background: var(--enamel); transform-origin: bottom; transition: transform 320ms var(--ease-out); }
@@ -443,7 +443,7 @@ button.plunger:hover { background: var(--brass-hi); }
 .moves__move.is-current .moves__glyph { color: var(--brass-lo); }
 
 .found { margin-top: var(--space-6); }
-.found h2 { font-family: var(--text); font-weight: 700; font-size: 1.1rem; margin: 0 0 var(--space-3); }
+.found h2 { font-family: var(--display); font-weight: 600; font-size: 1.25rem; margin: 0 0 var(--space-3); }
 .found ul { list-style: none; margin: 0; padding: 0; }
 .found button {
   width: 100%; display: grid; grid-template-columns: 4rem 1fr auto; gap: var(--space-3); align-items: baseline;
@@ -479,11 +479,10 @@ button.plunger:hover { background: var(--brass-hi); }
   .tally__unit { font-size: 1rem; }
   .tally__who { font-size: 0.9rem; margin-top: 0 !important; }
   .tally__eg { font-size: 0.8rem; line-height: 1.35; margin-top: 0.2rem !important; }
-  .case__explain { font-size: 0.8rem; line-height: 1.4; }
   .case--player .case__plungers .plunger--decor { width: 3.6rem; }
   .vocab__list { grid-template-columns: 1fr; }
   .ledger__cols, .ledger__summary { grid-template-columns: 3.4rem 1fr 3.4rem; gap: var(--space-3); padding-inline: 0.25rem; }
-  .ledger__count { font-size: 1.7rem; }
+  .ledger__count { font-size: 1.5rem; }
   .ledger__motif { grid-template-columns: 1fr; gap: 0.1rem; }
   .ledger__motif .glyph { font-size: 0.9rem; }
   .ledger__def { font-size: 0.85rem; }

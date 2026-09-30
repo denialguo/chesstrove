@@ -74,10 +74,17 @@ export const ENGINE_LABELS: LabelInfo[] = [
 ];
 
 // Named mates come in three forms (backend: named_mates.grade). `short_of` names the traits that kept one
-// out of the next form up; these say what differs from the classical picture, not what's wrong.
-export type MateForm = "textbook" | "canonical" | "variant";
-// what players see; the stored values stay textbook / canonical / variant
-export const FORM_NAME: Record<MateForm, string> = { textbook: "Classic", canonical: "Core", variant: "Variant" };
+// out of the next form up; these say what differs from the familiar picture, not what's wrong.
+export type MateForm = "textbook" | "characteristic" | "variant";
+export const MATE_FORMS: MateForm[] = ["textbook", "characteristic", "variant"];
+export const FORM_NAME: Record<MateForm, string> = { textbook: "Textbook", characteristic: "Characteristic", variant: "Variant" };
+export const FORM_HELP: Record<MateForm, string> = {
+  textbook: "Matches the familiar version of the pattern.",
+  characteristic: "Uses the defining mating mechanism, but with different geometry or placement.",
+  variant: "A recognized variation with more substantial differences from the usual form.",
+};
+/** Characteristic is the normal form and goes unmarked; only the two ends of the scale get a label. */
+export const formBadge = (form: MateForm): string | null => (form === "characteristic" ? null : FORM_NAME[form]);
 const DIFFERS: Record<string, string> = {
   no_extra_helpers: "other pieces help close the net",
   both_shoulders_are_rooks: "the shoulder pieces aren't both rooks",

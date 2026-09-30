@@ -115,6 +115,9 @@ CREATE TABLE IF NOT EXISTS events (
     UNIQUE (game_id, ply, type, detector_id)    -- re-running a detector replaces, never duplicates
 );
 CREATE INDEX IF NOT EXISTS events_type ON events (type, color);
+-- Named-mate forms were stored as textbook / canonical / variant; the middle tier is now "characteristic".
+-- The detector itself didn't change, so this relabels in place instead of replaying every game.
+UPDATE events SET metadata = jsonb_set(metadata, '{form}', '"characteristic"') WHERE metadata->>'form' = 'canonical';
 
 -- Which detector versions have seen each game, so re-runs only replay stale games.
 -- A game is up to date for a set of detectors iff detector_versions @> '{"ID": version, ...}'.

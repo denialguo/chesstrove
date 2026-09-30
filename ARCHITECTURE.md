@@ -178,14 +178,14 @@ different diagrams, and common usage stretches some names (Epaulette with non-ro
 bishop instead of a pawn). ChessTrove doesn't pretend otherwise. It keeps a recognised broad **family**
 searchable, and records on every event how far the position is from the classical picture:
 
-Players see these as **Classic** (`textbook`), **Core** (`canonical`) and **Variant**; the stored values
-keep their original names.
+| Form | Meaning | In the UI |
+|---|---|---|
+| `textbook` | Matches the familiar version of the pattern: the diagram people learn under that name. | a small "Textbook" label |
+| `characteristic` | Uses the defining mating mechanism, unaided, but with different geometry or placement (king location, orientation, which edge). The normal form. | unmarked |
+| `variant` | A recognized variation with more substantial differences: a classical relationship is weakened or substituted, or other attackers help close the net. | a small "Variant" label, with what differs |
 
-| Form | Meaning |
-|---|---|
-| `textbook` | Looks like the diagram people learn under that name. |
-| `canonical` | The pattern's characteristic pieces do their characteristic jobs, unaided. Location or orientation may differ. |
-| `variant` | Still that family, but other attackers help close the net, or the defining pieces differ. |
+Until September 2026 `characteristic` was stored as `canonical` (and shown as "Core"). `schema.sql` relabels
+those rows in place on startup; the detector logic didn't change, so no reanalysis is needed.
 
 The family test decides whether an event is emitted at all, and a false positive there is worse than a miss.
 The form is derived from concrete, stored traits, never from a score.
@@ -205,18 +205,18 @@ Event metadata, besides `king_square`, `checker` and `checker_piece`:
 - `form`.
 - `traits`: the booleans and descriptors the form came from, including `no_extra_helpers`.
 - `short_of`: the traits that kept the event out of the next tier up. The UI turns these into "differs from
-  the classic picture" phrases (`web/src/lib/motifs.ts`).
+  the familiar picture" phrases (`web/src/lib/motifs.ts`).
 - `defining` and `helpers`, as piece labels like `Qh7`, `Na6`, `e6`.
 - `own_blockers`, as squares.
 
 Not every pattern has three tiers. Where loosening the family would empty the name of meaning, the family test
-is already canonical and there is no variant tier. Where sources show no single stereotype, there is no
+is already characteristic and there is no variant tier. Where sources show no single stereotype, there is no
 textbook tier. One mate may carry several names (`BACK_RANK_MATE` + `OPERA_MATE` is fine). Every pattern holds
 under left-right mirroring and colour swap.
 
 In the table, a dash means the tier doesn't exist for that pattern.
 
-| Pattern | Family (emits the event) | Canonical | Textbook | Variant |
+| Pattern | Family (emits the event) | Characteristic | Textbook | Variant |
 |---|---|---|---|---|
 | Epaulette | Queen checks orthogonally from ≥ 2 squares away; both squares beside the king, across the line of check, hold the king's own pieces, of any kind. | Both shoulders are rooks and there are no helpers. | Also: the king has its back to the edge and the queen is 2 squares in front. | Non-rook shoulders, or helpers (e.g. a rook cutting off the line behind a mid-board king). Kept deliberately loose for review. |
 | Swallow's tail | A guarded queen, orthogonally adjacent; both diagonal squares behind the king are own. The queen covers the rest by construction. | Every match (`rear` records the tail pieces). | The two tail pieces are the king's only own blockers. | – |
@@ -240,13 +240,13 @@ In the table, a dash means the tier doesn't exist for that pattern.
 
 Deliberate ChessTrove interpretations:
 - **Pillsbury.** It extends to a king two squares from the corner, with the bishop covering the square toward
-  the corner. This keeps game 2276 (Kh6, a lifted Rg6 guarded by the f5 pawn, Bg8 covering h7) as canonical,
+  the corner. This keeps game 2276 (Kh6, a lifted Rg6 guarded by the f5 pawn, Bg8 covering h7) as characteristic,
   not textbook.
 - **Dovetail.** Its family already is the classical geometry, so every match is textbook.
 
 **Calibration on the real history** (all 5,558 games, both sides' mates; v1 → v3):
 
-| Pattern | v1 | v2 family | Textbook | Canonical | Variant |
+| Pattern | v1 | v2 family | Textbook | Characteristic | Variant |
 |---|---|---|---|---|---|
 | Anastasia | 14 | 13 | 0 | 3 | 10 |
 | Anderssen | 1 | 1 | 1 | 0 | 0 |
@@ -280,7 +280,7 @@ What the inspection found:
 A **rare moment** is one move matching at least one rare pattern, counted once however many labels it carries
 (`COUNT(DISTINCT (game_id, ply))`, split by the mover: the player or their opponents; the result doesn't matter).
 Rare patterns are `db.RARE_MOMENT_TYPES`: every detector except `MISSED_MATE_IN_ONE`, which is a mistake, not a rare
-moment (it stays in the collection). Named mates count as Classic or Core (`RARE_MOMENT_FORMS`); variants are
+moment (it stays in the collection). Named mates count in textbook or characteristic form (`RARE_MOMENT_FORMS`); variants are
 deliberately loose while they're under review, and 21 moves in DankSonPotato's games carried only a variant label. Engine
 labels and discoveries never count: the number must mean the same for every player, analysed or not. The collection's
 per-type counts are unchanged; the hero's examples use the per-type label counts on qualifying moves, which overlap.

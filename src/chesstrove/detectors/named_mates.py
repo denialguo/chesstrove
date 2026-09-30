@@ -3,15 +3,18 @@
 These names have no single rigid definition across chess sources, so each pattern answers three
 separate questions about the final position:
 
-  family     does the pattern's defining mechanism make the mate? This is what emits the event, and
-             false positives here are worse than misses.
-  canonical  do the pattern's characteristic pieces do their characteristic jobs, unaided?
-  textbook   does it also look like the diagram people learn under that name?
+  family          does the pattern's defining mechanism make the mate? This is what emits the event, and
+                  false positives here are worse than misses. A family member that fails the next test
+                  is a variant: a classical relationship is weakened, substituted or helped out.
+  characteristic  do the pattern's defining pieces do their defining jobs, unaided? Geometry, king
+                  location or orientation may still differ from the familiar diagram.
+  textbook        does it also look like the diagram people learn under that name?
 
-Each event carries `form` ("textbook", "canonical" or "variant"), the concrete `traits` the form was
+Each event carries `form` ("textbook", "characteristic" or "variant"), the concrete `traits` the form was
 derived from, and `short_of`: the traits that kept it out of the next tier up. There is no score. Not
 every pattern has all three tiers: where a looser family would lose the name's meaning, the family test
-is already canonical and there is no variant; where no stereotype stands out, there is no textbook tier.
+is already characteristic and there is no variant; where no stereotype stands out, there is no textbook tier.
+(Before September 2026 the middle tier was stored as "canonical"; schema.sql renames those rows.)
 
 Every piece a pattern names has to do its job in the final position (give the check, guard the checker,
 cover a flight square), not merely be on the board. Patterns hold mirrored left to right and for either
@@ -163,19 +166,19 @@ Match = dict[str, Any]
 
 
 def grade(m: Mate, defining: Iterable[chess.Square], traits: dict[str, Any],
-          canonical: Iterable[str] = (), textbook: Iterable[str] | None = ()) -> Match:
-    """Family membership is settled by the caller. `canonical` and `textbook` name the boolean traits each
+          characteristic: Iterable[str] = (), textbook: Iterable[str] | None = ()) -> Match:
+    """Family membership is settled by the caller. `characteristic` and `textbook` name the boolean traits each
     tier needs on top of the one below; `textbook=None` means the pattern has no textbook tier. Every
     match records `no_extra_helpers`, and a tier may ask for it."""
     defining = set(defining) | {m.checker}
     helpers = m.helpers(defining)
     traits = {**traits, "no_extra_helpers": not helpers}
-    short = [t for t in canonical if not traits[t]]
+    short = [t for t in characteristic if not traits[t]]
     if not short and textbook is not None:
         short = [t for t in textbook if not traits[t]]
-        form = "canonical" if short else "textbook"
+        form = "characteristic" if short else "textbook"
     else:
-        form = "variant" if short else "canonical"
+        form = "variant" if short else "characteristic"
     return {"form": form, "traits": traits, "short_of": short,
             "defining": sorted(map(m.label, defining)), "helpers": sorted(map(m.label, helpers)),
             "own_blockers": sorted(map(chess.square_name, m.own))}
@@ -187,7 +190,7 @@ def epaulette(m: Mate) -> Match | None:
     """Family: a queen checks head-on (orthogonally, from two or more squares away) and both squares
     beside the king, across the line of check, hold its own pieces (any pieces: the broad usage).
     Variants are deliberately loose for now (a mid-board king with pawn shoulders, sealed from behind by
-    another attacker, still counts) so they can be reviewed before being narrowed. Canonical: those shoulder pieces are both rooks and the queen needs no help. Textbook: also the king
+    another attacker, still counts) so they can be reviewed before being narrowed. Characteristic: those shoulder pieces are both rooks and the queen needs no help. Textbook: also the king
     has its back to the edge and the queen stands two squares in front."""
     if m.piece != Q or not m.orthogonal() or m.dist < 2:
         return None
@@ -201,14 +204,14 @@ def epaulette(m: Mate) -> Match | None:
         "both_shoulders_are_rooks": kinds == [R, R],
         "king_on_edge": m.d in _inward(m.king),
         "queen_two_squares_away": m.dist == 2,
-    }, canonical=["both_shoulders_are_rooks", "no_extra_helpers"], textbook=["king_on_edge", "queen_two_squares_away"])
+    }, characteristic=["both_shoulders_are_rooks", "no_extra_helpers"], textbook=["king_on_edge", "queen_two_squares_away"])
 
 
 def swallows_tail(m: Mate) -> Match | None:
     """Family: a queen mates from an orthogonally adjacent square; the two diagonal squares behind the
     king, which the queen can't reach, hold its own pieces (the queen covers everything else, so no
     helper is ever needed beyond her guard); `rear` records which pieces make the tail. Textbook: those
-    two are the only pieces of its own around the king. More own blockers make it canonical."""
+    two are the only pieces of its own around the king. More own blockers make it characteristic."""
     if m.piece != Q or not m.orthogonal() or m.dist != 1:
         return None
     (dx, dy), (px, py) = m.d, _perp(m.d)
@@ -237,7 +240,7 @@ def dovetail(m: Mate) -> Match | None:
 def anastasia(m: Mate) -> Match | None:
     """Family: a rook or queen mates along the edge the king stands on; the square straight in from the
     king holds its own piece; knights cover every flight square the checker doesn't, and at least one of
-    those squares needs the knight (nothing else covers it). Canonical: one knight takes both
+    those squares needs the knight (nothing else covers it). Characteristic: one knight takes both
     characteristic flights, the two squares diagonally inward from the king (g8 and g6 against Kh7).
     Textbook: also the Kh7 picture (the king on a side file, one step from the corner), with no other
     attacker needed. A knight covering only one of the two, the other shut by the king's own piece or
@@ -260,14 +263,14 @@ def anastasia(m: Mate) -> Match | None:
             all(s in m.free and k in m.cover[s] for s in flights) for k in knights),
         "king_on_side_file": v[0] != 0,
         "king_next_to_corner": m.next_to_corner(),
-    }, canonical=["knight_controls_both_characteristic_flights"],
+    }, characteristic=["knight_controls_both_characteristic_flights"],
         textbook=["king_on_side_file", "king_next_to_corner", "no_extra_helpers"])
 
 
 def arabian(m: Mate) -> Match | None:
     """Family: a rook mates from an adjacent square, guarded by a knight that also takes away a flight
     square the rook doesn't cover, and the knight isn't itself guarded by a pawn (that's a Hook mate).
-    Canonical: rook and knight cover everything between them (the king's own pieces may block the
+    Characteristic: rook and knight cover everything between them (the king's own pieces may block the
     rest; the king needn't be cornered). Textbook: also the king is in the
     corner. Variant: other attackers have to close squares too. Deliberately loose for now (it keeps
     mid-board kings and second heavy pieces) so the variants can be reviewed before being narrowed."""
@@ -278,11 +281,11 @@ def arabian(m: Mate) -> Match | None:
     if not knights or any(m.defenders(n, P) for n in m.defenders(m.checker, N)):
         return None  # none, or the guard is pawn-backed: that chain is a Hook mate
     return grade(m, knights, {"king_in_corner": m.in_corner()},
-                 canonical=["no_extra_helpers"], textbook=["king_in_corner"])
+                 characteristic=["no_extra_helpers"], textbook=["king_in_corner"])
 
 
 def boden(m: Mate) -> Match | None:
-    """Family (and canonical): a bishop mates; a second bishop, on the other colour, covers flight
+    """Family (and characteristic): a bishop mates; a second bishop, on the other colour, covers flight
     squares the first can't; the two bishops between them cover every flight square, and the king's
     own pieces hem it in. Textbook: the king is on its own back rank (the castled-long picture)."""
     if m.piece != B or not m.own:
@@ -299,7 +302,7 @@ def boden(m: Mate) -> Match | None:
 def opera(m: Mate) -> Match | None:
     """Family: a rook mates from an adjacent square on the king's edge, guarded by a bishop that also
     takes away another flight square (Morphy's Opera game: Rd8#, Bg5 guards d8 and covers e7). A queen in
-    the bishop's place doesn't count: that's an ordinary queen-and-rook mate. Canonical: rook and bishop
+    the bishop's place doesn't count: that's an ordinary queen-and-rook mate. Characteristic: rook and bishop
     need no other attacker. Textbook: also the king is on its own back rank."""
     if m.piece != R or m.dist != 1 or not m.along_edge():
         return None
@@ -307,11 +310,11 @@ def opera(m: Mate) -> Match | None:
     if not bishops:
         return None
     return grade(m, bishops, {"king_on_home_rank": m.home_rank()},
-                 canonical=["no_extra_helpers"], textbook=["king_on_home_rank"])
+                 characteristic=["no_extra_helpers"], textbook=["king_on_home_rank"])
 
 
 def anderssen(m: Mate) -> Match | None:
-    """Family (and canonical): a rook or queen mates from the corner next to the king, guarded
+    """Family (and characteristic): a rook or queen mates from the corner next to the king, guarded
     diagonally by a pawn that also covers another of the king's flight squares; the pawn usually needs
     support of its own (typically the king), which is part of the picture, not extra help. Textbook: a
     rook gives the mate."""
@@ -324,7 +327,7 @@ def anderssen(m: Mate) -> Match | None:
 
 
 def lolli(m: Mate) -> Match | None:
-    """Family (and canonical): a queen mates from the square directly in front of an edge king (Qg7#
+    """Family (and characteristic): a queen mates from the square directly in front of an edge king (Qg7#
     against Kg8), guarded by a pawn. From there the queen covers every flight square herself, so no
     helper is ever involved. Textbook: the castled-king picture, the king on its own back rank near a
     corner. Whether the king actually castled isn't checked."""
@@ -344,7 +347,7 @@ def damiano(m: Mate) -> Match | None:
     """Family: a queen mates from the edge square diagonally in front of a king one step from a corner
     (Qh7# against Kg8, Qg8# against Kh7), guarded by a pawn or, as a common substitute, a bishop.
     Scholar's-mate shapes (Qxf7# against Ke8) and Qb2# against Kc1 don't count: the queen must stand on
-    the corner's other edge. Canonical: queen and support need no other attacker (the king's own pieces
+    the corner's other edge. Characteristic: queen and support need no other attacker (the king's own pieces
     may close the rest). Textbook: also the support is a pawn and the king is on its own back rank."""
     if m.piece != Q or m.dist != 1 or m.orthogonal() or not m.next_to_corner() or m.in_corner():
         return None
@@ -357,7 +360,7 @@ def damiano(m: Mate) -> Match | None:
         "support_piece": chess.piece_name(m.kind(support[0])),
         "support_is_pawn": m.kind(support[0]) == P,
         "king_on_home_rank": m.home_rank(),
-    }, canonical=["no_extra_helpers"], textbook=["support_is_pawn", "king_on_home_rank"])
+    }, characteristic=["no_extra_helpers"], textbook=["support_is_pawn", "king_on_home_rank"])
 
 
 def morphy(m: Mate) -> Match | None:
@@ -374,7 +377,7 @@ def morphy(m: Mate) -> Match | None:
 
 
 def greco(m: Mate) -> Match | None:
-    """Family (and canonical): against a cornered king, a rook or queen mates along an edge; bishops
+    """Family (and characteristic): against a cornered king, a rook or queen mates along an edge; bishops
     cover every flight square the checker doesn't, and a piece of the king's own closes another.
     Textbook: the mate comes down the side file (Qh5# or Rh-file against Kh8), not along the back rank."""
     v = m.along_edge()
@@ -390,7 +393,7 @@ def greco(m: Mate) -> Match | None:
 def hook(m: Mate) -> Match | None:
     """Family: a rook mates from an adjacent square, guarded by a knight that is itself guarded by a pawn
     (the rook-knight-pawn chain). A rook-and-knight mate with that chain is a Hook, not an Arabian.
-    Canonical: the chain needs no other attacker. Textbook: also the king's own pieces close some of its
+    Characteristic: the chain needs no other attacker. Textbook: also the king's own pieces close some of its
     squares. Variant: other attackers help close the net."""
     if m.piece != R or m.dist != 1:
         return None
@@ -399,7 +402,7 @@ def hook(m: Mate) -> Match | None:
         return None
     chain = min(chains, key=lambda c: len(m.helpers(c)))
     return grade(m, chain, {"own_blockers_close_squares": bool(m.own)},
-                 canonical=["no_extra_helpers"], textbook=["own_blockers_close_squares"])
+                 characteristic=["no_extra_helpers"], textbook=["own_blockers_close_squares"])
 
 
 def corridor(m: Mate) -> Match | None:
@@ -415,7 +418,7 @@ def corridor(m: Mate) -> Match | None:
 
 
 def blackburne(m: Mate) -> Match | None:
-    """Family (and canonical): two bishops and a knight do all the work. The checker is one of them, every
+    """Family (and characteristic): two bishops and a knight do all the work. The checker is one of them, every
     flight square is covered by a bishop or knight, and both bishops and a knight each give check, guard
     the checker or cover a flight square. Sources draw it in several arrangements, so there is no
     textbook tier."""
@@ -433,7 +436,7 @@ def blackburne(m: Mate) -> Match | None:
 
 
 def reti(m: Mate) -> Match | None:
-    """Family (and canonical): a bishop mates from beside the king, guarded by a rook or queen along a
+    """Family (and characteristic): a bishop mates from beside the king, guarded by a rook or queen along a
     file or rank; the bishop also takes away a flight square of its own, the two pieces between them
     cover every free square, and at least three of the king's own pieces wall it in. Deliberately narrow:
     there is no variant tier. Textbook: four or more own pieces around the king (Réti-Tartakower, 1910)
@@ -458,10 +461,10 @@ def pillsbury(m: Mate) -> Match | None:
     """Family: a rook mates a king on an edge within two steps of a corner, coming straight in toward the
     edge (never along it), and a bishop takes away the edge square beside the king on the corner side
     (the corner itself when the king stands next to it: Rg-file against Kg8, Bb2 covering h8). A bishop covering
-    some other square doesn't make it Pillsbury's. Canonical: rook, bishop and anything guarding the rook
+    some other square doesn't make it Pillsbury's. Characteristic: rook, bishop and anything guarding the rook
     need no other attacker. Textbook: also the king is on its own back rank next to the corner and the
     rook checks from a distance (a rook lifted next to the king, or a king up the side file, is
-    canonical)."""
+    characteristic)."""
     if m.piece != R or m.d not in _inward(m.king) or m.along_edge() or not m.near_corner():
         return None
     px, py = _perp(m.d)
@@ -475,7 +478,7 @@ def pillsbury(m: Mate) -> Match | None:
         "bishop_covers_corner": toward in CORNERS,
         "king_on_home_rank": m.home_rank(),
         "rook_from_distance": m.dist >= 2,
-    }, canonical=["no_extra_helpers"], textbook=["bishop_covers_corner", "king_on_home_rank", "rook_from_distance"])
+    }, characteristic=["no_extra_helpers"], textbook=["bishop_covers_corner", "king_on_home_rank", "rook_from_distance"])
 
 
 def ladder(m: Mate) -> Match | None:
