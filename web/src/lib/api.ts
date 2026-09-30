@@ -51,7 +51,7 @@ export interface Discovery {
   played_move_rank?: number | null; legal_moves?: number | null;
   best_moves?: { uci: string; san: string | null }[];
   queen_promotion_evaluation?: Eval | null; evaluation?: Eval | null;
-  engine: { id: number; engine: string; nodes?: number; depth?: number };
+  engine?: { id: number; engine: string; nodes?: number; depth?: number }; // server results only
   score: { name: string; value: number | string };
 }
 export interface Discoveries { type: DiscoveryType; config: Discovery["engine"] | null; results: Discovery[] }

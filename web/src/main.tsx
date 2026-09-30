@@ -1,4 +1,4 @@
-import { StrictMode } from "react";
+import { StrictMode, Suspense, lazy } from "react";
 import { createRoot } from "react-dom/client";
 import { BrowserRouter, Route, Routes } from "react-router-dom";
 import "@fontsource/big-shoulders-display/700";
@@ -14,6 +14,8 @@ import { Player } from "./pages/Player";
 import { Game } from "./pages/Game";
 import { NotFound } from "./pages/NotFound";
 
+const EngineLab = lazy(() => import("./pages/EngineLab"));
+
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
     <BrowserRouter>
@@ -21,6 +23,7 @@ createRoot(document.getElementById("root")!).render(
         <Route path="/" element={<Landing />} />
         <Route path="/u/:platform/:username" element={<Player />} />
         <Route path="/g/:gameId" element={<Game />} />
+        <Route path="/lab/engine" element={<Suspense fallback={null}><EngineLab /></Suspense>} />
         <Route path="*" element={<NotFound />} />
       </Routes>
     </BrowserRouter>
