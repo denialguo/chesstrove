@@ -150,3 +150,14 @@ def test_site_routes_fall_back_to_the_app(client):
     assert "<div id=\"root\">" in client.get("/").text
     assert "<div id=\"root\">" in client.get("/u/chesscom/someone").text  # client-side route
     assert client.get("/api/nope").status_code == 404  # the API never falls through to the app
+
+
+def test_cors_allows_only_the_site_and_local_dev(client):
+    site = client.get("/api/detectors", headers={"Origin": "https://chesstrove.tech"})
+    assert site.headers["access-control-allow-origin"] == "https://chesstrove.tech"
+    assert "access-control-allow-origin" not in client.get("/api/detectors", headers={"Origin": "https://evil.example"}).headers
+    # the import POST sends JSON, so browsers ask first
+    pre = client.options("/api/imports/chesscom", headers={"Origin": "http://localhost:5173", "Access-Control-Request-Method": "POST",
+                                                          "Access-Control-Request-Headers": "content-type"})
+    assert pre.status_code == 200 and pre.headers["access-control-allow-origin"] == "http://localhost:5173"
+    assert client.options("/api/imports/chesscom", headers={"Origin": "https://evil.example", "Access-Control-Request-Method": "POST"}).status_code == 400

@@ -1,5 +1,6 @@
-# Render blueprint: the ChessTrove site on Render's free web service. The database is external
-# (Supabase); set CHESSTROVE_DATABASE_URL to its Session pooler connection string in the dashboard.
+# Render blueprint: the ChessTrove API (api.chesstrove.tech) on Render's free web service. The site itself is
+# on Vercel (web/vercel.json); the database is Supabase: set CHESSTROVE_DATABASE_URL to its Session pooler
+# connection string in the dashboard. Custom domain and DNS: README, "Hosting it publicly".
 services:
   - type: web
     name: chesstrove

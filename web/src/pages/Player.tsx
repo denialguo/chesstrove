@@ -7,6 +7,7 @@ import { Digits } from "../components/Digits";
 import { RecordBook } from "../components/RecordBook";
 import { EngineRecordBook } from "../components/EngineRecordBook";
 import { TopBar } from "../components/TopBar";
+import { Unreachable, Waiting } from "../components/Waiting";
 import { api, type Motif, ApiError, PLATFORM_NAME, type EventRow, type Platform, type PlayerSummary } from "../lib/api";
 import { formatDate, formatMonth, moveLabel, n, plural, roughDuration } from "../lib/format";
 import { BEST_UNDERPROMOTION, COUNTED, FORM_HELP, FORM_NAME, MATE_FORMS, MOTIFS, NAMED_MATES, formBadge, formNote, type MotifInfo } from "../lib/motifs";
@@ -48,16 +49,17 @@ export function Player() {
     } catch (e) {
       setError(e instanceof ApiError && e.status === 422 ? "That isn't a valid username."
         : e instanceof ApiError && e.status === 429 ? "Too many imports from your connection in the last hour. Try again later."
-        : "ChessTrove's server didn't answer. Try again in a moment.");
+        : "down");
     }
   }, [platform, username]);
 
+  const [attempt, setAttempt] = useState(0);
   useEffect(() => {
     importRequested.current = false;
     setSummary(null);
     setError(null);
     load();
-  }, [load]);
+  }, [load, attempt]);
 
   const running = summary?.latest_import?.status === "running";
   useEffect(() => {
@@ -69,8 +71,9 @@ export function Player() {
   if (!(platform in PLATFORM_NAME)) {
     return <Shell><div className="empty"><h1>Unknown site.</h1><p>ChessTrove reads Chess.com and Lichess.</p></div></Shell>;
   }
+  if (error === "down") return <Shell><Unreachable onRetry={() => setAttempt((a) => a + 1)} /></Shell>;
   if (error) return <Shell><div className="empty"><h1>Couldn’t load this player.</h1><p>{error}</p></div></Shell>;
-  if (!summary) return <Shell><div className="loading" aria-live="polite">Opening {username}…</div></Shell>;
+  if (!summary) return <Shell><Waiting>Opening {username}…</Waiting></Shell>;
 
   const failed = summary.games === 0 && summary.latest_import?.status === "failed";
   if (failed) {

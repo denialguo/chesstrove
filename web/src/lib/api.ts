@@ -1,5 +1,11 @@
 // Thin typed client for the FastAPI backend (/api/*).
 
+/** `base` + /api + path. An empty base means the page's own origin (local dev: Vite proxies /api). */
+export const joinApi = (base: string, path: string) => `${base.replace(/\/+$/, "")}/api${path}`;
+// Production builds set VITE_API_URL=https://api.chesstrove.tech; it's public config, never a secret.
+const API_BASE: string = import.meta.env.VITE_API_URL ?? "";
+export const apiUrl = (path: string) => joinApi(API_BASE, path);
+
 export type Platform = "chesscom" | "lichess";
 export const PLATFORM_NAME: Record<Platform, string> = { chesscom: "Chess.com", lichess: "Lichess" };
 
@@ -65,7 +71,7 @@ export class ApiError extends Error {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`/api${path}`, init);
+  const res = await fetch(apiUrl(path), init);
   if (!res.ok) throw new ApiError(res.status, `${res.status} ${res.statusText}`);
   return res.json() as Promise<T>;
 }

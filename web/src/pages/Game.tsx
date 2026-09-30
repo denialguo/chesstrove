@@ -3,8 +3,9 @@ import { useParams, useSearchParams } from "react-router-dom";
 import { ArrowUpDown, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, ExternalLink } from "lucide-react";
 import { Board } from "../components/Board";
 import { Digits } from "../components/Digits";
+import { Unreachable, Waiting } from "../components/Waiting";
 import { TopBar } from "../components/TopBar";
-import { api, PLATFORM_NAME, sourceUrl, type EnginePosition, type GameDetail, type Platform } from "../lib/api";
+import { api, ApiError, PLATFORM_NAME, sourceUrl, type EnginePosition, type GameDetail, type Platform } from "../lib/api";
 import { formatDate, moveLabel, timeControl } from "../lib/format";
 import { FORM_HELP, formBadge, formNote, motifInfo } from "../lib/motifs";
 
@@ -21,12 +22,16 @@ export function Game() {
   const { gameId = "" } = useParams();
   const [params, setParams] = useSearchParams();
   const [game, setGame] = useState<GameDetail | null>(null);
-  const [error, setError] = useState(false);
+  const [error, setError] = useState<"missing" | "down" | null>(null);
+  const [attempt, setAttempt] = useState(0);
   const [flipped, setFlipped] = useState(params.get("o") === "black");
   const movesRef = useRef<HTMLOListElement>(null);
   const ply = Math.max(0, Math.min(Number(params.get("ply") ?? 0) || 0, game?.moves.length ?? 0));
 
-  useEffect(() => { api.game(gameId).then(setGame).catch(() => setError(true)); }, [gameId]);
+  useEffect(() => {
+    setError(null);
+    api.game(gameId).then(setGame).catch((e) => setError(e instanceof ApiError && e.status === 404 ? "missing" : "down"));
+  }, [gameId, attempt]);
 
   const go = (next: number) => {
     if (!game) return;
@@ -64,8 +69,9 @@ export function Game() {
     return map;
   }, [game]);
 
-  if (error) return <Shell><div className="empty"><h1>No game with that number.</h1></div></Shell>;
-  if (!game) return <Shell><p className="loading">Setting up the board…</p></Shell>;
+  if (error === "missing") return <Shell><div className="empty"><h1>No game with that number.</h1></div></Shell>;
+  if (error) return <Shell><Unreachable onRetry={() => setAttempt((a) => a + 1)} /></Shell>;
+  if (!game) return <Shell><Waiting>Setting up the board…</Waiting></Shell>;
 
   const move = ply > 0 ? game.moves[ply - 1] : null;
   const fen = move ? move.fen_after : game.initial_fen ?? START;

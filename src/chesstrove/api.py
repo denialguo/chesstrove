@@ -19,6 +19,7 @@ from typing import Annotated, Literal
 from importlib.resources import files
 
 from fastapi import APIRouter, BackgroundTasks, Body, Depends, FastAPI, HTTPException, Path, Query, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -51,6 +52,11 @@ async def lifespan(_app: FastAPI):
 app = FastAPI(title="ChessTrove", description="Search every motif in your chess history.",
               docs_url="/api/docs", openapi_url="/api/openapi.json", lifespan=lifespan)
 app.add_middleware(GZipMiddleware, minimum_size=2000)  # the engine input is megabytes of repetitive text
+# The site (Vercel) and the API (Render) live on different domains; only these pages may call it from a browser.
+CORS_ORIGINS = ["https://chesstrove.tech", "https://www.chesstrove.tech",
+                "http://localhost:5173", "http://127.0.0.1:5173"]  # the last two: `npx vite` in web/
+app.add_middleware(CORSMiddleware, allow_origins=CORS_ORIGINS, allow_methods=["GET", "POST"],
+                   allow_headers=["Content-Type"], max_age=3600)
 api = APIRouter(prefix="/api")
 
 

@@ -8,6 +8,7 @@
 import { unpack, probeRequests, type Game, type InputGame, type GameResults, type ProbeRequest, type Analysed } from "./archaeology";
 import { store, playerKey, type StoredGame, type Speed } from "./store";
 import { ENGINE, UciEngine, type PositionResult } from "./uci";
+import { apiUrl } from "../lib/api";
 
 /** Baseline search per position. Chosen by the benchmark (ARCHITECTURE.md, "Browser engine"). */
 export const BASELINE_NODES = 25_000;
@@ -62,7 +63,7 @@ export class Analysis {
   }
 
   async load(): Promise<void> {
-    const r = await fetch(`/api/players/${this.platform}/${encodeURIComponent(this.user)}/engine-input`);
+    const r = await fetch(apiUrl(`/players/${this.platform}/${encodeURIComponent(this.user)}/engine-input`));
     if (!r.ok) throw new Error(`couldn't load the games (${r.status})`);
     const input: InputGame[] = await r.json();
     this.games = input.filter((g) => !g.chess960 && g.ply_count > 0).map((g) => unpack(g, this.user));

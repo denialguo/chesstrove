@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
-    "check": "esbuild checks/forms.check.ts --bundle --platform=node --format=esm --log-level=warning | node --input-type=module"
+    "check": "for f in checks/*.check.ts; do esbuild $f --bundle --platform=node --format=esm --define:import.meta.env={} --log-level=warning | node --input-type=module || exit 1; done"
   },
   "dependencies": {
     "@fontsource-variable/source-code-pro": "^5.3.0",

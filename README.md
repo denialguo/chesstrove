@@ -33,15 +33,45 @@ uv run scripts/benchmark.py --db
 
 ## Hosting it publicly
 
-The site runs on Render's free web service, with Supabase's free Postgres as the database:
+Three pieces, so the site loads instantly even while the free API server is asleep:
+
+| Address | What | Host |
+|---|---|---|
+| `https://chesstrove.tech` | the React app, static files only | Vercel |
+| `https://api.chesstrove.tech` | the FastAPI backend (`/api/*`) | Render |
+| (private) | Postgres | Supabase |
+
+The browser calls the API directly (never through Vercel), and only the API knows the database.
 
 1. **Supabase.** Create a project. Under **Connect**, copy the **Session pooler** connection string (port
-   5432; Render can't reach the direct IPv6 address).
+   5432; Render can't reach the direct IPv6 address). Put Render in the same region as the project
+   (`render.yaml` says Virginia, Supabase's default `us-east-1`).
 2. **Copy your local data up** (optional): `scripts/push_db.sh 'postgresql://...'`. This replaces anything
    ChessTrove already stored there. Without it, run `CHESSTROVE_DATABASE_URL=... uv run chesstrove init-db`
    once.
-3. **Render.** Go to **New → Blueprint**, pick this repo (it reads `render.yaml`), and paste the connection
-   string as `CHESSTROVE_DATABASE_URL`.
+3. **Render (API).** Go to **New → Blueprint** and pick this repo (it reads `render.yaml`). Environment:
+   - `CHESSTROVE_DATABASE_URL`: the Session pooler string (the blueprint asks for it; it's the only secret).
+   - `CHESSTROVE_PUBLIC=1`: set by the blueprint.
+
+   Then **Settings → Custom Domains → Add** `api.chesstrove.tech`. Render shows the CNAME target to use.
+4. **Vercel (site).** **Add New → Project**, import this repo, and set **Root Directory** to `web`. The
+   framework, build command and `dist` output come from `web/vercel.json`, which also sends every app route
+   (`/u/...`, `/g/...`) to `index.html`. Environment variable, for Production:
+   - `VITE_API_URL=https://api.chesstrove.tech`
+
+   It's baked into the public JavaScript, so it must never hold a secret; the database URL never goes
+   to Vercel. Then **Settings → Domains → Add** `chesstrove.tech` and `www.chesstrove.tech`, and choose to
+   redirect `www` to the bare domain.
+5. **DNS** (at the registrar, e.g. Namify): add exactly the records Vercel shows for `chesstrove.tech` and
+   `www`, and the CNAME Render shows for `api`. Remove any parking records the registrar added for `@` or
+   `www`. Both hosts issue HTTPS certificates once the records resolve.
+
+The API only answers browsers on `https://chesstrove.tech`, `https://www.chesstrove.tech` and local Vite
+(`http://localhost:5173`, `http://127.0.0.1:5173`); see `CORS_ORIGINS` in `api.py`. Vercel preview
+deployments get their own URLs, so they can load but can't reach the API unless one is added there.
+
+Locally nothing changes: `npx vite` in `web/` proxies `/api` to `chesstrove serve`, and `npm run build`
+still writes the app into the Python package, so `chesstrove serve` hosts both on one port.
 
 `CHESSTROVE_PUBLIC=1` (set by the blueprint) makes three changes:
 - It turns off PGN upload, reanalysis and the import list.
@@ -54,6 +84,7 @@ pushed up show that record book. Everyone else gets an offer to analyse their ga
 machine at `/lab/engine`.
 
 Free-tier limits:
-- Render sleeps after 15 idle minutes, so the first visit after that takes about a minute to wake it.
+- Render sleeps after 15 idle minutes. The site itself still loads at once from Vercel; the first player or
+  game page after that says it's waking the server, which takes about a minute.
 - Supabase pauses a project after a week without traffic, and its database is capped at 500 MB, roughly
   25k more games beyond the current data.
