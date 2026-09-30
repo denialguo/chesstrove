@@ -111,7 +111,12 @@ FORMS = [
     # others with a canonical or variant tier
     ("OPERA_MATE", "4kb2/8/7N/6B1/8/8/8/3R2K1 w - - 0 1", "d1d8", "variant"),  # a knight covers f7
     ("GRECO_MATE", "7k/7p/7B/8/8/8/8/R5K1 w - - 0 1", "a1a8", "canonical"),  # along the back rank
-    ("LADDER_MATE", "4k3/R7/8/8/8/8/8/1Q4K1 w - - 0 1", "b1b8", "canonical"),  # queen and rook
+    ("LADDER_MATE", "4k3/R7/8/8/8/8/8/1Q4K1 w - - 0 1", "b1b8", "textbook"),  # queen and rook: still the ladder
+    ("SWALLOWS_TAIL_MATE", "3rbr2/4k3/8/3P4/8/7Q/8/7K w - - 0 1", "h3e6", "canonical"),  # a third own blocker on e8
+    # Hook takes the rook-knight-pawn chain; Arabian doesn't claim it too
+    ("ARABIAN_MATE", "7k/1R6/5N2/4P3/8/8/8/6K1 w - - 0 1", "b7h7", None),
+    ("HOOK_MATE", "7k/1R6/5N2/4P3/8/8/8/6K1 w - - 0 1", "b7h7", "canonical"),  # the chain alone, no own blockers
+    ("HOOK_MATE", "3rk3/R7/7B/3N4/2P5/8/8/6K1 w - - 0 1", "a7e7", "variant"),  # a bishop covers f8
 ]
 
 

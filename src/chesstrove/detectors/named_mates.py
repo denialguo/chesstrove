@@ -207,16 +207,18 @@ def epaulette(m: Mate) -> Match | None:
 def swallows_tail(m: Mate) -> Match | None:
     """Family: a queen mates from an orthogonally adjacent square; the two diagonal squares behind the
     king, which the queen can't reach, hold its own pieces (the queen covers everything else, so no
-    helper is ever needed beyond her guard). The family is the classical picture, so every match is
-    textbook; `rear` records which pieces make the tail."""
+    helper is ever needed beyond her guard); `rear` records which pieces make the tail. Textbook: those
+    two are the only pieces of its own around the king. More own blockers make it canonical."""
     if m.piece != Q or not m.orthogonal() or m.dist != 1:
         return None
     (dx, dy), (px, py) = m.d, _perp(m.d)
     rear = [_off(m.king, -dx + px, -dy + py), _off(m.king, -dx - px, -dy - py)]
     if not all(s in m.own for s in rear):
         return None
-    return grade(m, m.defenders(m.checker, P, N, B, R, Q, K),
-                 {"rear": sorted(chess.piece_name(m.board.piece_type_at(s)) for s in rear)})
+    return grade(m, m.defenders(m.checker, P, N, B, R, Q, K), {
+        "rear": sorted(chess.piece_name(m.board.piece_type_at(s)) for s in rear),
+        "only_tail_pieces_block": m.own == set(rear),
+    }, textbook=["only_tail_pieces_block"])
 
 
 def dovetail(m: Mate) -> Match | None:
@@ -264,16 +266,17 @@ def anastasia(m: Mate) -> Match | None:
 
 def arabian(m: Mate) -> Match | None:
     """Family: a rook mates from an adjacent square, guarded by a knight that also takes away a flight
-    square the rook doesn't cover. Canonical: rook and knight cover everything between them (the king's
-    own pieces may block the rest; the king needn't be cornered). Textbook: also the king is in the
+    square the rook doesn't cover, and the knight isn't itself guarded by a pawn (that's a Hook mate).
+    Canonical: rook and knight cover everything between them (the king's own pieces may block the
+    rest; the king needn't be cornered). Textbook: also the king is in the
     corner. Variant: other attackers have to close squares too. Deliberately loose for now (it keeps
     mid-board kings and second heavy pieces) so the variants can be reviewed before being narrowed."""
     if m.piece != R or m.dist != 1:
         return None
     rest = m.rest()
     knights = [n for n in m.defenders(m.checker, N) if any(n in m.cover[s] for s in rest)]
-    if not knights:
-        return None
+    if not knights or any(m.defenders(n, P) for n in m.defenders(m.checker, N)):
+        return None  # none, or the guard is pawn-backed: that chain is a Hook mate
     return grade(m, knights, {"king_in_corner": m.in_corner()},
                  canonical=["no_extra_helpers"], textbook=["king_in_corner"])
 
@@ -385,17 +388,18 @@ def greco(m: Mate) -> Match | None:
 
 
 def hook(m: Mate) -> Match | None:
-    """Family (and textbook): a rook mates from an adjacent square, guarded by a knight that is guarded
-    by a pawn; the king's own pieces close its remaining squares, and nothing outside that chain is
-    needed."""
-    if m.piece != R or m.dist != 1 or not m.own:
+    """Family: a rook mates from an adjacent square, guarded by a knight that is itself guarded by a pawn
+    (the rook-knight-pawn chain). A rook-and-knight mate with that chain is a Hook, not an Arabian.
+    Canonical: the chain needs no other attacker. Textbook: also the king's own pieces close some of its
+    squares. Variant: other attackers help close the net."""
+    if m.piece != R or m.dist != 1:
         return None
-    for knight in m.defenders(m.checker, N):
-        for pawn in m.defenders(knight, P):
-            chain = {m.checker, knight, pawn}
-            if all(m.cover[s] & chess.SquareSet(chain) for s in m.free if s != m.checker):
-                return grade(m, chain, {})
-    return None
+    chains = [{m.checker, k, p} for k in m.defenders(m.checker, N) for p in m.defenders(k, P)]
+    if not chains:
+        return None
+    chain = min(chains, key=lambda c: len(m.helpers(c)))
+    return grade(m, chain, {"own_blockers_close_squares": bool(m.own)},
+                 canonical=["no_extra_helpers"], textbook=["own_blockers_close_squares"])
 
 
 def corridor(m: Mate) -> Match | None:
@@ -475,8 +479,8 @@ def pillsbury(m: Mate) -> Match | None:
 
 
 def ladder(m: Mate) -> Match | None:
-    """Family (and canonical): two heavy pieces, one mating along the king's edge, the other on the next
-    line in covering every square of it. Textbook: both are rooks."""
+    """Family (and textbook): two heavy pieces, one mating along the king's edge, the other on the next
+    line in covering every square of it. Rooks or queens alike; `both_rooks` records which."""
     v = m.along_edge()
     if m.piece not in (R, Q) or not v:
         return None
@@ -485,7 +489,7 @@ def ladder(m: Mate) -> Match | None:
     line = chess.SquareSet(chess.BB_RANKS[chess.square_rank(inner[0])] if v[1] else chess.BB_FILES[chess.square_file(inner[0])])
     for h in line:
         if h != m.checker and m.kind(h) in (R, Q) and all(s in m.free and h in m.cover[s] for s in inner):
-            return grade(m, [h], {"both_rooks": m.piece == R and m.kind(h) == R}, textbook=["both_rooks"])
+            return grade(m, [h], {"both_rooks": m.piece == R and m.kind(h) == R})
     return None
 
 
@@ -504,7 +508,7 @@ def box(m: Mate) -> Match | None:
 
 
 class NamedMate:
-    version = 2  # 2: family/form split; events carry form, traits and the pieces involved
+    version = 3  # 2: family/form split, events carry form and traits. 3: Hook takes the pawn-backed chain from Arabian; every ladder is textbook; swallow's tail textbook needs only the two tail blockers
 
     def __init__(self, id: str, test: Callable[[Mate], Match | None]):
         self.id, self.test = id, test

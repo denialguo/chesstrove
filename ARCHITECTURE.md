@@ -171,7 +171,7 @@ Unless a note says otherwise, "mate" means `board_after.is_checkmate()`.
 Events store `color` (the side that moved). "Who" is resolved at query time: `events --player NAME` matches
 the event's color against `games.white/black`.
 
-### Named mates: family and form (`detectors/named_mates.py`, v2)
+### Named mates: family and form (`detectors/named_mates.py`, v3)
 
 Chess sources don't agree on rigid geometry for these names. Lichess, Wikipedia and the older books draw
 different diagrams, and common usage stretches some names (Epaulette with non-rook shoulders, Damiano with a
@@ -216,10 +216,10 @@ In the table, a dash means the tier doesn't exist for that pattern.
 | Pattern | Family (emits the event) | Canonical | Textbook | Variant |
 |---|---|---|---|---|
 | Epaulette | Queen checks orthogonally from ≥ 2 squares away; both squares beside the king, across the line of check, hold the king's own pieces, of any kind. | Both shoulders are rooks and there are no helpers. | Also: the king has its back to the edge and the queen is 2 squares in front. | Non-rook shoulders, or helpers (e.g. a rook cutting off the line behind a mid-board king). Kept deliberately loose for review. |
-| Swallow's tail | A guarded queen, orthogonally adjacent; both diagonal squares behind the king are own. The queen covers the rest by construction. | – | Every match (`rear` records the tail pieces). | – |
+| Swallow's tail | A guarded queen, orthogonally adjacent; both diagonal squares behind the king are own. The queen covers the rest by construction. | Every match (`rear` records the tail pieces). | The two tail pieces are the king's only own blockers. | – |
 | Dovetail | A guarded queen, diagonally adjacent; the two squares on the far side from her are own. The geometry forces an off-edge king. | – | Every match. | – |
 | Anastasia | A rook or queen mates along the king's edge; the square straight in from the king is own; knights cover every square the checker doesn't, and at least one of those squares needs the knight (otherwise the knight is incidental and it's not Anastasia). | One knight covers both characteristic flights (the two squares diagonally inward: g8 and g6 against Kh7). | Also: the Kh7 picture (side file, next to the corner), with no helpers. | The knight covers only one flight; the other is own-blocked or covered by the checker. Often a back-rank mate that a knight finishes. |
-| Arabian | A rook, adjacent, guarded by a knight that also covers a square the rook doesn't. | Rook and knight need no helpers; the king needn't be cornered. | Also: the king is in the corner. | Helpers close squares too. Loose for review: mid-board kings and second heavy pieces included. |
+| Arabian | A rook, adjacent, guarded by a knight that also covers a square the rook doesn't, and that knight isn't guarded by a pawn (the chain makes it a Hook, never both). | Rook and knight need no helpers; the king needn't be cornered. | Also: the king is in the corner. | Helpers close squares too. Loose for review: mid-board kings and second heavy pieces included. |
 | Boden | A bishop mates; a bishop on the other colour covers squares the first can't; bishops cover every free square; own pieces hem the king in. | Every match. | The king is on its own back rank. | – |
 | Opera | A rook, adjacent along the king's edge, guarded by a bishop that also covers another flight square. A queen in the bishop's place doesn't count. | No helpers. | Also: the king is on its own back rank. | Helpers. |
 | Anderssen | A rook or queen mates from the corner next to the king, guarded diagonally by a pawn that also covers a flight square. The pawn's own support (often the king) is part of the picture. | Every match. | A rook mates. | – |
@@ -227,39 +227,39 @@ In the table, a dash means the tier doesn't exist for that pattern.
 | Damiano | A queen mates from the edge square diagonally in front of a king one step from a corner (Qh7# vs Kg8, Qg8# vs Kh7), guarded by a pawn or bishop. Scholar's mate (Qxf7# vs Ke8) and Qb2# vs Kc1 are out. | No helpers; bishop support is fine. | Also: pawn support and the king on its own back rank. | Helpers. |
 | Morphy | Cornered king; a bishop mates along the long diagonal; one edge square beside the king is own, and a rook covers the other. | – | Every match. | – |
 | Greco | Cornered king; a rook or queen mates along an edge; bishops cover every square the checker doesn't; at least one own blocker. | Every match. | The mate comes down the side file, not along the back rank. | – |
-| Hook | Rook, adjacent, guarded by a knight guarded by a pawn; that chain plus own pieces do everything. | – | Every match. | – |
+| Hook | Rook, adjacent, guarded by a knight guarded by a pawn. It takes these mates from Arabian. | The chain needs no helpers. | Also: some own blockers close squares. | Helpers. |
 | Corridor | ChessTrove's own generalised back-rank mate: along any edge except the king's back rank, own pieces fill the next line in. | Every match. | – (not a traditional name). | – |
 | Blackburne | Two bishops and a knight do all the work (check, guard, cover). | Every match. | – (drawn in several arrangements). | – |
 | Réti | A bishop mates from beside the king, guarded orthogonally by a rook or queen. The bishop also covers a flight square; the two cover every free square; ≥ 3 own blockers. Deliberately narrow. | Every match. | ≥ 4 own blockers and a rook guard (Réti–Tartakower, 1910). | – (omitted: a looser Réti means nothing). |
 | Pillsbury | A rook mates coming straight in toward an edge king within two squares of a corner (never along the edge); a bishop covers the edge square beside the king on the corner side. A bishop covering some other square doesn't qualify. | No helpers (the rook's guard counts as defining when the rook is adjacent). | Also: the bishop covers the corner itself, the king is on its home rank, and the rook checks from a distance. | Helpers. |
-| Ladder | Two heavy pieces: one mates along the edge, the other covers every square of the next line in. | Every match. | Both are rooks. | – |
+| Ladder | Two heavy pieces: one mates along the edge, the other covers every square of the next line in. | – | Every match, rooks or queens alike (`both_rooks` records which). | – |
 | Box | King and rook only: the rook mates along the edge, and the attacking king covers the rest. | – | Every match. | – |
 
 Deliberate ChessTrove interpretations:
 - **Pillsbury.** It extends to a king two squares from the corner, with the bishop covering the square toward
   the corner. This keeps game 2276 (Kh6, a lifted Rg6 guarded by the f5 pawn, Bg8 covering h7) as canonical,
   not textbook.
-- **Swallow's tail and Dovetail.** Their family already is the classical geometry, so every match is textbook.
+- **Dovetail.** Its family already is the classical geometry, so every match is textbook.
 
-**Calibration on the real history** (all 5,558 games, both sides' mates; old v1 → new v2):
+**Calibration on the real history** (all 5,558 games, both sides' mates; v1 → v3):
 
 | Pattern | v1 | v2 family | Textbook | Canonical | Variant |
 |---|---|---|---|---|---|
 | Anastasia | 14 | 13 | 0 | 3 | 10 |
 | Anderssen | 1 | 1 | 1 | 0 | 0 |
-| Arabian | 7 | 17 | 4 | 3 | 10 |
+| Arabian | 7 | 11 | 4 | 2 | 5 |
 | Box | 18 | 18 | 18 | 0 | 0 |
 | Damiano | 20 | 42 | 3 | 34 | 5 |
 | Dovetail | 25 | 25 | 25 | 0 | 0 |
 | Epaulette | 2 | 6 | 1 | 0 | 5 |
 | Greco | 3 | 3 | 2 | 1 | 0 |
-| Hook | 7 | 7 | 7 | 0 | 0 |
-| Ladder | 119 | 119 | 36 | 83 | 0 |
+| Hook | 7 | 10 | 7 | 0 | 3 |
+| Ladder | 119 | 119 | 119 | 0 | 0 |
 | Lolli | 39 | 39 | 25 | 14 | 0 |
 | Opera | 16 | 16 | 7 | 5 | 4 |
 | Pillsbury | 3 | 2 | 1 | 1 | 0 |
 | Réti | 3 | 0 | 0 | 0 | 0 |
-| Swallow's tail | 16 | 16 | 16 | 0 | 0 |
+| Swallow's tail | 16 | 16 | 8 | 8 | 0 |
 
 What the inspection found:
 - **Réti.** All three v1 matches were coincidences: the bishop mated from two squares away, or the position

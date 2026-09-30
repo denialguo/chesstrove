@@ -72,7 +72,8 @@ const DIFFERS: Record<string, string> = {
   supporter_is_rook: "a queen guards the bishop instead of a rook",
   bishop_covers_corner: "the bishop covers the square toward the corner, not the corner itself",
   rook_from_distance: "the rook mates from right beside the king",
-  both_rooks: "one of the two pieces is a queen",
+  only_tail_pieces_block: "more of the king's own pieces hem it in than the two tail pieces",
+  own_blockers_close_squares: "none of the king's own pieces hem it in",
 };
 /** "Variant: the shoulder pieces aren't both rooks." for a named-mate event; null for other events. */
 export function formNote(metadata: Record<string, unknown>): { form: MateForm; note: string } | null {
