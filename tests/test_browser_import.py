@@ -305,3 +305,15 @@ def test_the_browser_deep_pass_produces_exactly_the_native_output():
     browser = subprocess.run(["node", "checks/pyodide-core.mjs", "deep"], cwd=WEB, input=json.dumps(games),
                              capture_output=True, text=True, check=True).stdout
     assert json.loads(browser) == json.loads(native) and len(json.loads(native)) == 56
+
+
+def test_a_server_restart_leaves_browser_imports_running(client, conn):
+    """The indexing happens in the visitor's tab: a deploy or restart mustn't end it (it did, in the alpha)."""
+    import_id, auth = session(client)
+    server_import = db.start_import(conn, "chesscom", "someone_else")
+    with TestClient(api.app):  # startup: what a restart runs
+        pass
+    assert db.get_import(conn, server_import)["status"] == "failed"
+    assert db.get_import(conn, import_id)["status"] == "running"
+    r = client.post(f"/api/indexing/{import_id}/batches", headers=auth, json=batch(indexed()["games"][:2]))
+    assert r.status_code == 200 and r.json()["stored"] == 2

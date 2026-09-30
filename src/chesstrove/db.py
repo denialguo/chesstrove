@@ -204,8 +204,11 @@ def touch_run_session(conn: psycopg.Connection, run_id: int) -> None:
 
 
 def fail_running_imports(conn: psycopg.Connection, reason: str) -> None:
+    """Server-side imports die with the process. Browser imports don't: their work happens in the visitor's tab, so
+    they carry on after a restart (and end by going idle: browser_import.IDLE)."""
     conn.execute("""UPDATE imports SET status = 'failed', finished_at = now(), errors = errors || %s
-                    WHERE status = 'running'""", (Jsonb([{"error": reason}]),))
+                    WHERE status = 'running' AND coalesce(resume_state->>'client', '') <> 'browser'""",
+                 (Jsonb([{"error": reason}]),))
 
 
 # --- games & moves -------------------------------------------------------------------------------
