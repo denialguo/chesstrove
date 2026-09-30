@@ -161,3 +161,11 @@ def test_cors_allows_only_the_site_and_local_dev(client):
                                                           "Access-Control-Request-Headers": "content-type"})
     assert pre.status_code == 200 and pre.headers["access-control-allow-origin"] == "http://localhost:5173"
     assert client.options("/api/imports/chesscom", headers={"Origin": "https://evil.example", "Access-Control-Request-Method": "POST"}).status_code == 400
+
+
+def test_the_public_site_refuses_to_start_without_its_database(monkeypatch):
+    monkeypatch.setattr(api, "PUBLIC", True)
+    monkeypatch.delenv("CHESSTROVE_DATABASE_URL", raising=False)
+    with pytest.raises(RuntimeError, match="CHESSTROVE_DATABASE_URL"):
+        with TestClient(api.app):
+            pass

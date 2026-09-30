@@ -43,6 +43,10 @@ FRESH = timedelta(minutes=10)  # a finished import this recent is returned inste
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    if PUBLIC and not os.environ.get("CHESSTROVE_DATABASE_URL"):
+        # without it, db.connect falls back to a built-in Postgres on the host's temporary disk: an empty site that
+        # forgets everything on the next restart. Fail the deploy instead.
+        raise RuntimeError("CHESSTROVE_PUBLIC=1 needs CHESSTROVE_DATABASE_URL (the Supabase session pooler string)")
     with db.connect() as c:
         db.init_schema(c)  # idempotent: a deploy with new columns needs no manual step
         # imports run in this process, so any still "running" were cut off by a restart (a CLI import running
