@@ -14,7 +14,7 @@ from test_chesscom import ARCHIVES, fake_api
 @pytest.fixture
 def client(dsn, conn, monkeypatch):
     monkeypatch.setenv("CHESSTROVE_DATABASE_URL", dsn)
-    monkeypatch.setattr(api, "expected_games", lambda source, username: 4)  # no network in tests
+    monkeypatch.setattr(api, "profile", lambda source, username: {"games": 4, "rating": 1500, "rating_mode": "blitz"})  # no network
     return TestClient(api.app)  # runs background tasks right after each response
 
 
@@ -54,6 +54,8 @@ def test_chesscom_import(client, monkeypatch):
     imp = client.get(f"/api/imports/{r.json()['import_id']}").json()
     assert (imp["status"], imp["source_ref"], imp["games_imported"], imp["games_expected"]) == ("completed", "alice", 4, 4)
     assert imp["account_id"] is not None
+    summary = client.get("/api/players/chesscom/alice").json()
+    assert (summary["rating"], summary["rating_mode"]) == (1500, "blitz")  # the platform's, not the newest game's
 
     # asking again straight away returns the import that just finished instead of starting another
     api_calls = fake_api()

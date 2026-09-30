@@ -146,10 +146,10 @@ def _start_account_import(c, request: Request, background: BackgroundTasks, sour
     return {"import_id": import_id, "status": "running"}
 
 
-def expected_games(source: str, username: str) -> int | None:
-    """The player's game count as the platform reports it, or None if it won't say."""
+def profile(source: str, username: str) -> dict | None:
+    """What the platform says about the player (game count, current rating), or None if it won't say."""
     try:
-        return (chesscom.expected_games if source == "chesscom" else lichess.expected_games)(username)
+        return (chesscom.profile if source == "chesscom" else lichess.profile)(username)
     except Exception:  # only a progress hint: never let it stop an import
         log.warning("no game count for %s:%s", source, username, exc_info=True)
         return None
@@ -157,9 +157,9 @@ def expected_games(source: str, username: str) -> int | None:
 
 def _queued(source: str, job, username: str, *args, **kwargs) -> None:
     # the total first, so the page can show it while the import waits for a slot
-    if (total := expected_games(source, username)) is not None:
+    if (found := profile(source, username)) is not None:
         with db.connect() as c:
-            db.set_games_expected(c, kwargs["import_id"], total)
+            db.set_profile(c, kwargs["import_id"], found)
     with IMPORT_SLOTS[source]:  # waits while the others finish; the row already says "running"
         _in_new_connection(job, username, *args, **kwargs)
 

@@ -37,6 +37,9 @@ CREATE TABLE IF NOT EXISTS imports (
 ALTER TABLE imports ADD COLUMN IF NOT EXISTS games_skipped int NOT NULL DEFAULT 0;
 -- what the platform says the player has played, fetched when an account import starts (NULL: unknown)
 ALTER TABLE imports ADD COLUMN IF NOT EXISTS games_expected int;
+-- the platform's current rating in the player's most-played time control, fetched with games_expected
+ALTER TABLE imports ADD COLUMN IF NOT EXISTS player_rating int;
+ALTER TABLE imports ADD COLUMN IF NOT EXISTS rating_mode text;
 
 CREATE TABLE IF NOT EXISTS games (
     id            bigserial PRIMARY KEY,

@@ -8,6 +8,13 @@ export const n = (value: number) => num.format(value);
 export const plural = (count: number, one: string, many = `${one}s`) => `${n(count)} ${count === 1 ? one : many}`;
 
 /** "29…Nf2#" / "30.Qe6": move number notation from a ply (1-based). */
+/** A deliberately rough time: estimates from a rate that keeps changing shouldn't look precise. */
+export function roughDuration(seconds: number) {
+  const m = seconds / 60;
+  return m < 2 ? "a minute or two" : m < 60 ? `about ${m < 10 ? Math.round(m) : Math.round(m / 5) * 5} minutes`
+    : `about ${Math.round(m / 30) / 2} hours`;
+}
+
 export function moveLabel(ply: number, san: string, color: "w" | "b") {
   const number = Math.ceil(ply / 2);
   return color === "w" ? `${number}.${san}` : `${number}…${san}`;

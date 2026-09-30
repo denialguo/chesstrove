@@ -178,3 +178,9 @@ def test_open_ndjson_waits_out_rate_limit_and_sends_token(monkeypatch):
     monkeypatch.setattr(lichess.time, "sleep", sleeps.append)
     assert list(lichess.open_ndjson("https://x.test/")) == [{"id": "a"}, {"id": "b"}]
     assert sleeps == [60]
+
+
+def test_profile_rates_the_most_played_time_control():
+    user = {"count": {"all": 201}, "perfs": {"bullet": {"rating": 1775, "games": 151}, "blitz": {"rating": 1844, "games": 35},
+                                             "puzzle": {"rating": 2020, "games": 341}}}
+    assert lichess.profile("x", user) == {"games": 201, "rating": 1775, "rating_mode": "bullet"}

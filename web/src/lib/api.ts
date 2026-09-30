@@ -11,7 +11,7 @@ export interface Import {
 export interface PlayerSummary {
   platform: Platform; username: string; display_name: string | null; games: number; positions: number;
   first_game: string | null; last_game: string | null; wins: number; draws: number; losses: number;
-  rating: number | null; motifs: Motif[];
+  rating: number | null; rating_mode?: string | null; motifs: Motif[];
   engine: { games_analyzed: number; positions_analyzed: number; config: { engine_name: string; limit_kind: string; limit_value: number } } | null;
   latest_import: Import | null;
 }

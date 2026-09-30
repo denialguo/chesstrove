@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Card, CARDS } from "./RecordBook";
 import type { Discovery, DiscoveryType, Platform } from "../lib/api";
-import { n, plural } from "../lib/format";
+import { n, plural, roughDuration } from "../lib/format";
 import { discoveries } from "../engine/archaeology";
 import { Analysis, BASELINE_NODES, CONFIG, device, supported, workersFor, type Progress } from "../engine/runner";
 import { playerKey, store, type RunState, type Speed } from "../engine/store";
@@ -15,11 +15,7 @@ const SPEEDS: { id: Speed; label: string }[] = [
 ];
 const PER_WORKER = 40; // positions a second, a conservative guess for an average device at 25k nodes
 
-function duration(seconds: number) {
-  const m = seconds / 60;
-  return m < 2 ? "a minute or two" : m < 60 ? `about ${m < 10 ? Math.round(m) : Math.round(m / 5) * 5} minutes`
-    : `about ${Math.round(m / 30) / 2} hours`;
-}
+const duration = roughDuration;
 
 type Phase = "checking" | "unsupported" | "offer" | "active";
 

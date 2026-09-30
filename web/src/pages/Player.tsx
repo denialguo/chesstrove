@@ -8,7 +8,7 @@ import { RecordBook } from "../components/RecordBook";
 import { EngineRecordBook } from "../components/EngineRecordBook";
 import { TopBar } from "../components/TopBar";
 import { api, type Motif, ApiError, PLATFORM_NAME, type EventRow, type Platform, type PlayerSummary } from "../lib/api";
-import { formatDate, formatMonth, moveLabel, n, plural } from "../lib/format";
+import { formatDate, formatMonth, moveLabel, n, plural, roughDuration } from "../lib/format";
 import { FORM_NAME, MOTIFS, NAMED_MATES, formNote, type MateForm, type MotifInfo } from "../lib/motifs";
 
 const POLL_MS = 2000;
@@ -19,10 +19,14 @@ export function Player() {
   const [summary, setSummary] = useState<PlayerSummary | null>(null);
   const [error, setError] = useState<string | null>(null);
   const importRequested = useRef(false);
+  const samples = useRef<[number, number][]>([]); // (time, games stored) while an import runs: the rate behind the estimate
 
   const load = useCallback(async () => {
     try {
       const s = await api.player(platform, username);
+      if (s.latest_import?.status === "running") {
+        samples.current = [...samples.current, [Date.now(), s.games] as [number, number]].filter(([t]) => t > Date.now() - 60_000);
+      } else samples.current = [];
       setSummary(s);
       // fetch new games when there's no import yet, the last one failed, or it finished over a day ago; the
       // server returns the running (or just-finished) import instead of starting a duplicate
@@ -90,6 +94,10 @@ export function Player() {
   const name = summary.display_name ?? username;
   // what the platform says they've played (Chess.com counts rated games only, hence "about")
   const expected = summary.latest_import?.games_expected ?? null;
+  // time left: from the last minute's rate, once there's 15 s of it and games are actually arriving
+  const [first, last] = [samples.current[0], samples.current[samples.current.length - 1]];
+  const rate = first && last && last[0] - first[0] >= 15_000 ? ((last[1] - first[1]) * 1000) / (last[0] - first[0]) : 0;
+  const importLeft = running && expected && rate > 0 && expected > summary.games ? roughDuration((expected - summary.games) / rate) : null;
 
   return (
     <Shell>
@@ -97,7 +105,7 @@ export function Player() {
         <h1 id="player-name" className="player-head__name">{name}</h1>
         <p className="player-head__meta">
           {PLATFORM_NAME[platform]}
-          {summary.rating ? <> · <span className="num">{summary.rating}</span></> : null}
+          {summary.rating ? <> · <span className="num">{summary.rating}</span>{summary.rating_mode ? ` ${summary.rating_mode}` : ""}</> : null}
           {summary.games > 0 && <> · {plural(summary.games, "game")} since {formatMonth(summary.first_game)}</>}
         </p>
       </section>
@@ -137,7 +145,7 @@ export function Player() {
         </div>
         <p className="case__plate" aria-live="polite">
           {running
-            ? `Importing from ${PLATFORM_NAME[platform]}${expected ? `: ${n(summary.games)} of ${platform === "chesscom" ? "about " : ""}${n(expected)} read so far` : ""}. Motifs appear as games arrive; you can leave and come back.`
+            ? `Importing from ${PLATFORM_NAME[platform]}${expected ? `: ${n(summary.games)} of ${platform === "chesscom" ? "about " : ""}${n(expected)} read so far` : ""}${importLeft ? `, ${importLeft} left` : ""}. Motifs appear as games arrive; you can leave and come back.`
             : <><span className="num">{n(summary.wins)}</span> wins · <span className="num">{n(summary.draws)}</span> draws · <span className="num">{n(summary.losses)}</span> losses</>}
         </p>
       </div>

@@ -130,8 +130,9 @@ def get_import(conn: psycopg.Connection, import_id: int) -> dict | None:
     return conn.execute("SELECT * FROM imports WHERE id = %s", (import_id,)).fetchone()
 
 
-def set_games_expected(conn: psycopg.Connection, import_id: int, n: int) -> None:
-    conn.execute("UPDATE imports SET games_expected = %s WHERE id = %s", (n, import_id))
+def set_profile(conn: psycopg.Connection, import_id: int, profile: dict) -> None:
+    conn.execute("UPDATE imports SET games_expected = %s, player_rating = %s, rating_mode = %s WHERE id = %s",
+                 (profile["games"], profile["rating"], profile["rating_mode"], import_id))
 
 
 def latest_import(conn: psycopg.Connection, source: str, source_ref: str) -> dict | None:
@@ -686,6 +687,12 @@ def player_summary(conn: psycopg.Connection, platform: str, username: str) -> di
             GROUP BY e.type ORDER BY e.type""",
         params,
     ).fetchall()
+    # the platform's own current rating beats the rating on whichever game happens to be newest so far
+    current = conn.execute(
+        """SELECT player_rating, rating_mode FROM imports WHERE source = %(platform)s AND source_ref = lower(%(user)s)
+           AND player_rating IS NOT NULL ORDER BY id DESC LIMIT 1""", params).fetchone()
+    if current:
+        totals = {**totals, "rating": current["player_rating"], "rating_mode": current["rating_mode"]}
     config = default_engine_config(conn)
     engine = None
     if config:

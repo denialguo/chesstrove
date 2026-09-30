@@ -25,12 +25,17 @@ RETRY_STATUSES = (429, 500, 502, 503, 504)
 FETCH_ERRORS = (urllib.error.URLError, TimeoutError, json.JSONDecodeError)
 
 
-def expected_games(username: str, fetch: Callable[[str], Any] | None = None) -> int:
-    """Games the player has played, from their stats: wins + losses + draws over every chess mode. Chess.com
-    counts rated games only, so the archives usually hold a few more."""
+def profile(username: str, fetch: Callable[[str], Any] | None = None) -> dict:
+    """From the player's stats: games played (wins + losses + draws over every chess mode; Chess.com counts
+    rated games only, so the archives usually hold a few more) and the current rating in the mode they've
+    played most."""
     stats = (fetch or fetch_json)(STATS_URL.format(urllib.parse.quote(username.lower())))
-    return sum(sum(v["record"].get(k, 0) for k in ("win", "loss", "draw"))
-               for key, v in stats.items() if key.startswith("chess") and isinstance(v, dict) and "record" in v)
+    modes = {key: v for key, v in stats.items() if key.startswith("chess") and isinstance(v, dict) and "record" in v}
+    played = {key: sum(v["record"].get(k, 0) for k in ("win", "loss", "draw")) for key, v in modes.items()}
+    top = max(played, key=played.get, default=None)
+    rating = (modes[top].get("last") or {}).get("rating") if top else None
+    mode = top and top.removeprefix("chess_").replace("chess960_", "960 ")
+    return {"games": sum(played.values()), "rating": rating, "rating_mode": mode if rating else None}
 
 
 def fetch_json(url: str, attempts: int = 4) -> Any:
