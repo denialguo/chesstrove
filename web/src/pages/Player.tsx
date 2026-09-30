@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Link, useParams } from "react-router-dom";
 import { ArrowRight, ChevronDown } from "lucide-react";
 import { Board } from "../components/Board";
@@ -12,9 +12,12 @@ import { api, type Motif, ApiError, PLATFORM_NAME, type EventRow, type Platform,
 import { formatDate, formatMonth, moveLabel, n, plural, roughDuration } from "../lib/format";
 import { BEST_UNDERPROMOTION, COUNTED, FORM_HELP, FORM_NAME, MATE_FORMS, MOTIFS, NAMED_MATES, formBadge, formNote, type MotifInfo } from "../lib/motifs";
 import { supported } from "../engine/runner";
+import { Indexer, supported as indexingSupported, type State as IndexState } from "../indexer/indexer";
 import { checkUnderpromotions, savedVerdicts, type UpVerdict } from "../engine/underpromotions";
 
 const POLL_MS = 2000;
+const IDLE_MS = 3.5 * 60_000; // a browser import this quiet has stopped (tab closed): take it over (server: browser_import.IDLE)
+const touch = () => typeof matchMedia === "function" && matchMedia("(pointer: coarse)").matches;
 
 export function Player() {
   const { platform: rawPlatform = "", username = "" } = useParams();
@@ -22,6 +25,12 @@ export function Player() {
   const [summary, setSummary] = useState<PlayerSummary | null>(null);
   const [error, setError] = useState<string | null>(null);
   const importRequested = useRef(false);
+  // Chess.com histories are indexed on this device (web/src/indexer); Lichess, and browsers that can't, use the server
+  const ix = useMemo(() => (platform === "chesscom" && indexingSupported() ? new Indexer(username) : null), [platform, username]);
+  useEffect(() => () => ix?.dispose(), [ix]);
+  const local = useSyncExternalStore(useCallback((fn: () => void) => ix?.subscribe(fn) ?? (() => {}), [ix]),
+                                     () => ix?.state ?? null);
+  const [ask, setAsk] = useState<null | "confirm" | "continue">(null);
   const samples = useRef<[number, number][]>([]); // (time, games stored) while an import runs: the rate behind the estimate
 
   const load = useCallback(async () => {
@@ -34,10 +43,27 @@ export function Player() {
       // fetch new games when there's no import yet, the last one failed, or it finished over a day ago; the
       // server returns the running (or just-finished) import instead of starting a duplicate
       const last = s.latest_import;
-      const due = !last || last.status === "failed"
+      // a running browser session this browser holds the token for, with no worker in this page: it was
+      // interrupted here (reload, closed tab). Offer to continue now rather than after the idle timeout.
+      if (ix && !importRequested.current && last?.status === "running" && last.resume_state?.client === "browser"
+          && ix.state.status === "idle" && (await ix.init())?.importId === last.id) {
+        importRequested.current = true;
+        return setAsk("continue");
+      }
+      const abandoned = last?.status === "running" && last.resume_state?.client === "browser"
+        && Date.now() - Date.parse(last.resume_state.last_seen ?? "") > IDLE_MS;
+      const due = !last || last.status === "failed" || abandoned
         || (last.status === "completed" && Date.now() - Date.parse(last.finished_at ?? "") > 86_400_000);
       if (due && !importRequested.current) {
         importRequested.current = true;
+        if (ix) {
+          const saved = await ix.init();
+          if (saved && last?.id === saved.importId) return setAsk("continue"); // this browser's own unfinished session
+          if (touch() && s.games === 0) return setAsk("confirm");            // phones: only when asked
+          await ix.start();
+          setSummary(await api.player(platform, username));
+          return;
+        }
         try {
           await api.startImport(platform, username);
         } catch (e) {
@@ -51,11 +77,18 @@ export function Player() {
         : e instanceof ApiError && e.status === 429 ? "Too many imports from your connection in the last hour. Try again later."
         : "down");
     }
-  }, [platform, username]);
+  }, [platform, username, ix]);
+
+  const indexHere = async () => {
+    setAsk(null);
+    await ix?.start();
+    load();
+  };
 
   const [attempt, setAttempt] = useState(0);
   useEffect(() => {
     importRequested.current = false;
+    setAsk(null);
     setSummary(null);
     setError(null);
     load();
@@ -64,9 +97,11 @@ export function Player() {
   const running = summary?.latest_import?.status === "running";
   useEffect(() => {
     if (!running) return;
-    const t = setInterval(load, POLL_MS);
+    // while this device indexes, poll gently: the summary is a heavy query for a big history, and batches are
+    // being stored on the same server
+    const t = setInterval(load, local?.status === "running" ? 6000 : POLL_MS);
     return () => clearInterval(t);
-  }, [running, load]);
+  }, [running, load, local?.status]);
 
   if (!(platform in PLATFORM_NAME)) {
     return <Shell><div className="empty"><h1>Unknown site.</h1><p>ChessTrove reads Chess.com and Lichess.</p></div></Shell>;
@@ -123,7 +158,7 @@ export function Player() {
           {running ? (
             <Tally value={expected ?? summary.games} running
               unit={expected ? `games on ${PLATFORM_NAME[platform]}` : "games in so far"}
-              who="Importing" examples={null} />
+              who={ix ? "Indexing" : "Importing"} examples={null} />
           ) : (
             <Tally value={rare.mine} unit={rare.mine === 1 ? "Rare moment" : "Rare moments"}
               who={`by ${name}`} examples={examples(rare.types, "mine")} />
@@ -132,11 +167,14 @@ export function Player() {
             who="by their opponents" examples={examples(rare.types, "against")} />
         </div>
         <div className="case__plate" aria-live="polite">
-          <p>
+          {ix && (ask || (local && local.status !== "idle" && local.status !== "done")) ? (
+            <IndexPlate state={local} ask={ask} games={summary.games} expected={expected} left={importLeft} name={name}
+              onStart={indexHere} onPause={() => ix.pause()} />
+          ) : <p>
             {running
               ? `Importing from ${PLATFORM_NAME[platform]}${expected ? `: ${n(summary.games)} of ${platform === "chesscom" ? "about " : ""}${n(expected)} read so far` : ""}${importLeft ? `, ${importLeft} left` : ""}. Motifs appear as games arrive; you can leave and come back.`
               : <><span className="num">{n(summary.wins)}</span> wins · <span className="num">{n(summary.draws)}</span> draws · <span className="num">{n(summary.losses)}</span> losses</>}
-          </p>
+          </p>}
         </div>
       </div>
 
@@ -388,5 +426,40 @@ function Specimens({ platform, username, type, side, only }: {
         );
       })}
     </ul>
+  );
+}
+
+/** The hero plate while a history is indexed on this device (or could be). Counts are the server's: what's stored. */
+function IndexPlate({ state, ask, games, expected, left, name, onStart, onPause }: {
+  state: IndexState | null; ask: null | "confirm" | "continue"; games: number; expected: number | null; left: string | null;
+  name: string; onStart: () => void; onPause: () => void;
+}) {
+  const of = expected ? ` of about ${n(expected)}` : "";
+  const pct = expected ? ` (${Math.min(99, Math.floor((100 * games) / expected))}%)` : "";
+  const button = (label: string, fn: () => void) => <button type="button" className="engine-btn" onClick={fn}>{label}</button>;
+  if (ask === "confirm") {
+    return <><p>{name}’s games haven’t been indexed yet. It runs on this device, newest games first; a few thousand games take a minute or two on a laptop, longer on a phone.</p>
+      {button("Index on this device", onStart)}</>;
+  }
+  if (ask === "continue" || state?.status === "paused") {
+    return <><p>Indexing paused at {n(games)}{of} games. What’s here is saved; it carries on from the next month.</p>
+      {button("Continue indexing", onStart)}</>;
+  }
+  if (state?.status === "error") {
+    return <><p>Indexing stopped: {state.error}</p>{state.retry && button("Try again", onStart)}</>;
+  }
+  if (state?.status === "watching") return <p>Being indexed on another device: {n(games)}{of} games so far.</p>;
+  const starting = !state || state.phase === "loading" || state.phase === "listing";
+  return (
+    <>
+      <p>
+        {starting ? "Starting the indexer on this device…"
+          : <>Indexing on this device: {n(games)}{of} games{pct}{left ? `, ${left} left` : ""}.
+            {state.archivesDone > 0 && " Newest games are in; older months follow."}
+            {state.events > 0 && ` ${plural(state.events, "find")} so far.`}
+            {state.uploading && <span className="index-saving"> Saving…</span>}</>}
+      </p>
+      {!starting && button("Pause", onPause)}
+    </>
   );
 }

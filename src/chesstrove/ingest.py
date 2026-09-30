@@ -10,6 +10,7 @@ import psycopg
 
 from chesstrove import db
 from chesstrove.analysis import Run, analyze, tracked_run
+from chesstrove.indexing import event_rows, pack_moves
 from chesstrove.importers import chesscom, lichess
 from chesstrove.importers.pgn import ParseFailure, read_pgn
 from chesstrove.models import CanonicalGame
@@ -192,8 +193,8 @@ def store_batch(
             errors.append({**(context or {}), "index": index, "error": f"{type(e).__name__}: {e}"})
     ids = db.insert_games(conn, [g for g, _, _ in new.values()], import_id)  # a key stored meanwhile is left out
     duplicate += len(new) - len(ids)
-    db.insert_moves(conn, [(ids[k], facts) for k, (_, facts, _) in new.items() if k in ids])
-    db.insert_events(conn, run.id, [(ids[k], events) for k, (_, _, events) in new.items() if k in ids])
+    db.insert_moves(conn, [(ids[k], pack_moves(facts) if facts else None) for k, (_, facts, _) in new.items() if k in ids])
+    db.insert_events(conn, run.id, [(ids[k], event_rows(events)) for k, (_, _, events) in new.items() if k in ids])
     return list(ids.values()), sum(len(new[k][2]) for k in ids), duplicate, errors
 
 

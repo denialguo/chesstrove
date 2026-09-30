@@ -47,7 +47,7 @@ PGN file / Chess.com API / Lichess API
   replay(game)                   reconstruction.py, one pass, yields MoveContext per ply
         │                        (board_before, move, board_after, san, MoveFacts)
         ├──► game_moves rows     COPY, one packed row per game
-        └──► detectors/          every detector sees the same MoveContext stream (analysis.analyze)
+        └──► detectors/          every detector sees the same MoveContext stream (indexing.analyze)
                   ▼
                events rows + game_analysis (which detector versions saw this game)
 
@@ -55,6 +55,70 @@ PGN file / Chess.com API / Lichess API
 ```
 
 A game is replayed **once** per pass. Detectors never replay games themselves.
+
+## Where indexing runs (built)
+
+| Work | Where | Why |
+|---|---|---|
+| Deterministic import and indexing (fetch, parse, replay, detectors, packing) | **the visitor's browser**, in a Web Worker, on the public site (Chess.com) | a laptop core is ~10× Render's free 0.1 CPU, and there's one per visitor |
+| Checking and storing the results | Render (FastAPI) → Supabase, one short transaction per batch | shared, persistent: the next visitor gets the page instantly |
+| Stockfish | a separate, opt-in browser engine ("Browser engine" below) | unrelated to this |
+| CLI, tests, Lichess, browsers that can't | the Python importer on the server (`ingest.py`) | same results; still the reference |
+
+**One analyzer, two runtimes.** `indexing.py` holds replay, detectors, the packed `game_moves` row and the
+event rows, and imports nothing but the standard library and python-chess. The server runs it natively; the
+browser runs **the same file** in [Pyodide](https://pyodide.org) (CPython in WebAssembly). The worker
+(`web/src/indexer/worker.ts`) bundles `src/chesstrove`'s core modules at build time and loads python-chess
+from `web/public/py` (the `uv.lock` pin, zipped by `scripts/build_browser_chess.sh`); Pyodide itself comes
+from the jsDelivr CDN, only when indexing starts. Nothing is ported, so nothing can drift: every detector change
+reaches both at once. `tests/test_browser_import.py` holds it to that: the browser core imports no server code,
+and Pyodide's output equals native Python's on castling, Chess960, en passant, promotions, set-up positions and
+every named-mate picture and form (Node + the `pyodide` npm package, offline).
+
+**The flow.** `POST /api/indexing/chesscom` starts (or adopts) a session: an `imports` row with
+`resume_state = {client: "browser", months_done, run_id, token_sha256, last_seen}`, and a secret token for this
+browser. The worker fetches Chess.com's archives **directly** (its public API sends
+`Access-Control-Allow-Origin: *`), **newest month first**, skipping months already stored (the current month is
+always redone). It analyses 100 games at a time and uploads each batch while analysing the next
+(`POST /api/indexing/{id}/batches`), then `…/finish`. The server stores a batch exactly as `ingest.store_batch`
+would: same columns, same `game_moves`, same events, `game_analysis` marked with the detector versions. So
+`games`, `game_moves`, `events`, `game_analysis` and `imports.resume_state.months_done` mean what they always
+meant, and pages can't tell who indexed a history.
+
+**Surviving sleep, restarts and closed tabs.** Nothing long-running happens on the server: each batch is one
+request and one transaction, retried by the worker through 5xx, 429 and dropped connections (~3 minutes of
+backoff, enough for Render to wake). A month counts as done only once the server has acknowledged its last
+batch; the browser keeps the session (import id, token, progress) in IndexedDB. A reload shows "Continue
+indexing"; the token holder resumes the same import. A session with no batch for 3 minutes is abandoned: the
+next visitor's start takes it over, and the old token stops working. Two tabs on one player: the second watches
+the first. Batches are idempotent (`source_key` conflicts count as duplicates), so overlap is harmless.
+
+**Trust.** The browser is an untrusted client, and this is a shared index. What the server checks
+(`browser_import.py`): the session token; detector versions equal to its own (else 409: reload); every game's
+shape (a Chess.com id, the indexed player on one side, bounded columns, packed arrays exactly `ply_count` long,
+values in range); every event (a known detector at its current version, a ply inside the game, the right
+color, bounded metadata). Then it **replays from its own PGN every game carrying a rare-moment event** (~11% of
+real games) plus one random game per batch, and refuses the batch unless everything matches. So every rare moment
+a page shows was derived on the server. What's left: an unsampled game's moves or missed-mate events could
+disagree with its PGN, events could be left out, and a PGN is whatever the client sent (an invented game is still
+limited to a real-looking Chess.com id and this player). Every game keeps its raw PGN, so any of it can be
+re-derived with the same code later. Server CPU per history: 4.8 s natively for 3,689 games, against 30 s for
+the server importer.
+
+**Measured** (MacBook, Chrome; DankSonPotato, 3,689 games, 48 months; results identical to the server importer):
+
+| | Server importer (native, local DB) | Browser indexing (Pyodide, 1 worker) |
+|---|---|---|
+| First games / first rare moment on the page | when the import ends | **1.5 s / 2.5 s** |
+| Whole history | 30 s native; on Render's 0.1 CPU ≈ 5 min | **62 s** (analysis 56 s, uploads overlapped) |
+| Server CPU | all of it (30 s native) | 4.8 s native (validation 0.1 s, replaying 12% of games 4.0 s) |
+| Pyodide start | – | 0.8–1.1 s (CDN, cached after) |
+| Memory | – | 29 MB WebAssembly heap; ~350 MB peak for the whole tab |
+
+Hikaru (68,535 games, 520 variants skipped, fetched live): first games on the page after 3.6 s, 10,000 after
+3.7 minutes, the whole history in 25.7 minutes on one worker (20.6 ms a game; memory flat at ~370 MB). Reloading
+mid-import and pressing Continue carries on with the same import: the finished history was identical, with only
+the half-done month's 4 games uploaded twice (counted as duplicates).
 
 ## Layout
 

@@ -6,6 +6,8 @@ import react from "@vitejs/plugin-react";
 // Vercel builds the same app into dist/ (web/vercel.json) and sets VITE_API_URL to the API's own domain.
 export default defineConfig({
   plugins: [react()],
-  server: { proxy: { "/api": "http://127.0.0.1:8000" } },
+  // fs.allow: the indexing worker bundles ChessTrove's Python core straight from ../src/chesstrove
+  server: { proxy: { "/api": "http://127.0.0.1:8000" }, fs: { allow: [".."] } },
+  worker: { format: "es" },
   build: { outDir: "../src/chesstrove/web", emptyOutDir: true },
 });

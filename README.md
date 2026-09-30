@@ -66,6 +66,12 @@ The browser calls the API directly (never through Vercel), and only the API know
    `www`, and the CNAME Render shows for `api`. Remove any parking records the registrar added for `@` or
    `www`. Both hosts issue HTTPS certificates once the records resolve.
 
+**Indexing runs in visitors' browsers.** On the public site a Chess.com history is indexed on the visitor's
+device (ARCHITECTURE.md, "Where indexing runs"): the worker loads Pyodide from `cdn.jsdelivr.net` and bundles
+ChessTrove's Python core from `src/chesstrove` at build time, so the Vercel build needs the files outside
+`web/`. Keep **Settings → Build and Deployment → "Include files outside the root directory in the Build Step"**
+on (Vercel's default). Render only checks and stores batches; Lichess still imports on the server.
+
 The API only answers browsers on `https://chesstrove.tech`, `https://www.chesstrove.tech` and local Vite
 (`http://localhost:5173`, `http://127.0.0.1:5173`); see `CORS_ORIGINS` in `api.py`. Vercel preview
 deployments get their own URLs, so they can load but can't reach the API unless one is added there.

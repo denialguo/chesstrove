@@ -6,6 +6,7 @@ Long jobs (imports, reanalysis) return 202 with the new row's id and run in the 
 poll GET /api/imports/{id} or GET /api/analysis-runs/{id}.
 """
 
+import json
 import logging
 import os
 import threading
@@ -18,14 +19,15 @@ from typing import Annotated, Literal
 
 from importlib.resources import files
 
-from fastapi import APIRouter, BackgroundTasks, Body, Depends, FastAPI, HTTPException, Path, Query, Request
+from fastapi import APIRouter, BackgroundTasks, Body, Depends, FastAPI, Header, HTTPException, Path, Query, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from pydantic import BaseModel, Field
 
-from chesstrove import archaeology, db, detectors, insights, labels
+from chesstrove import archaeology, browser_import, db, detectors, insights, labels
 from chesstrove.analysis import reanalyze
 from chesstrove.importers import chesscom, lichess
 from chesstrove.ingest import import_chesscom, import_lichess, import_pgn
@@ -56,7 +58,7 @@ app.add_middleware(GZipMiddleware, minimum_size=2000)  # the engine input is meg
 CORS_ORIGINS = ["https://chesstrove.tech", "https://www.chesstrove.tech",
                 "http://localhost:5173", "http://127.0.0.1:5173"]  # the last two: `npx vite` in web/
 app.add_middleware(CORSMiddleware, allow_origins=CORS_ORIGINS, allow_methods=["GET", "POST"],
-                   allow_headers=["Content-Type"], max_age=3600)
+                   allow_headers=["Content-Type", "X-Import-Token"], max_age=3600)
 api = APIRouter(prefix="/api")
 
 
@@ -110,6 +112,72 @@ async def create_pgn_import(request: Request, background: BackgroundTasks, c: Co
 @api.post("/imports/chesscom", status_code=202)
 def create_chesscom_import(body: AccountImport, request: Request, background: BackgroundTasks, c: Conn) -> dict:
     return _start_account_import(c, request, background, "chesscom", import_chesscom, body)
+
+
+# --- browser indexing: the visitor's browser replays and detects (web/src/indexer); these only check and store ---
+
+MAX_BATCH_BYTES = 4_000_000
+
+
+def _rejected(e: browser_import.Rejected) -> HTTPException:
+    return HTTPException(e.status, str(e))
+
+
+class IndexingStart(BaseModel):
+    username: str = Field(min_length=1, max_length=50, pattern=r"^[A-Za-z0-9_-]+$")
+    import_id: int | None = None  # this browser's earlier session, to carry on with
+    token: str | None = Field(None, max_length=100)
+
+
+@api.post("/indexing/chesscom")
+def start_indexing(body: IndexingStart, request: Request, background: BackgroundTasks, c: Conn) -> dict:
+    """Start (or adopt) indexing a Chess.com history in this browser. See browser_import.start."""
+    ip = _client_ip(request)
+    resume = (body.import_id, body.token) if body.import_id and body.token else None
+    try:
+        res = browser_import.start(c, body.username, allow=lambda: not PUBLIC or _allow(ip), resume=resume)
+    except browser_import.Rejected as e:
+        raise _rejected(e) from None
+    if res["mode"] == "index" and not resume:  # the platform's game count, for progress; one request, off the response path
+        background.add_task(_set_profile, "chesscom", body.username.lower(), res["import_id"])
+    return res
+
+
+def _set_profile(source: str, username: str, import_id: int) -> None:
+    if (found := profile(source, username)) is not None:
+        with db.connect() as c:
+            db.set_profile(c, import_id, found)
+
+
+@api.post("/indexing/{import_id}/batches")
+async def indexing_batch(import_id: int, request: Request, x_import_token: Annotated[str, Header()]) -> dict:
+    """One batch of indexed games (browser_import.store): checked, then stored in one short transaction."""
+    if int(request.headers.get("content-length") or 0) > MAX_BATCH_BYTES:
+        raise HTTPException(413, "batch too large")
+    raw = await request.body()
+    if len(raw) > MAX_BATCH_BYTES:
+        raise HTTPException(413, "batch too large")
+    try:
+        body = json.loads(raw)
+    except ValueError:
+        raise HTTPException(422, "expected JSON") from None
+
+    def store() -> dict:
+        with db.connect() as c:
+            return browser_import.store(c, import_id, x_import_token, body)
+    try:
+        return await run_in_threadpool(store)
+    except browser_import.Rejected as e:
+        raise _rejected(e) from None
+
+
+@api.post("/indexing/{import_id}/finish")
+def finish_indexing(import_id: int, x_import_token: Annotated[str, Header()], c: Conn) -> dict:
+    try:
+        browser_import.finish(c, import_id, x_import_token)
+    except browser_import.Rejected as e:
+        raise _rejected(e) from None
+    return {"status": "completed"}
 
 
 @api.post("/imports/lichess", status_code=202)
@@ -177,7 +245,14 @@ def list_imports(c: Conn) -> list[dict]:
 
 @api.get("/imports/{import_id}")
 def get_import(import_id: int, c: Conn) -> dict:
-    return _found(db.get_import(c, import_id), "import")
+    return _public_import(_found(db.get_import(c, import_id), "import"))
+
+
+def _public_import(imp: dict | None) -> dict | None:
+    """An import as the API shows it: without a browser session's token hash."""
+    if imp and isinstance(imp.get("resume_state"), dict):
+        imp = {**imp, "resume_state": {k: v for k, v in imp["resume_state"].items() if k != "token_sha256"}}
+    return imp
 
 
 # --- games -----------------------------------------------------------------------------------------
@@ -187,7 +262,9 @@ def player(platform: Platform, username: Username, c: Conn) -> dict:
     """A player page's data: record, rating, motif counts (theirs vs. against them), engine coverage, and
     the latest import. `games: 0` with no import means "not imported yet". `best_underpromotions`: the
     native index's verdicts, or null if it has none for this player."""
-    return {**db.player_summary(c, platform, username), "best_underpromotions": insights.best_underpromotions(c, platform, username)}
+    summary = db.player_summary(c, platform, username)
+    return {**summary, "latest_import": _public_import(summary["latest_import"]),
+            "best_underpromotions": insights.best_underpromotions(c, platform, username)}
 
 
 @api.get("/players/{platform}/{username}/engine-input")

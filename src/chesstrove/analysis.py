@@ -7,9 +7,8 @@ from dataclasses import dataclass
 import psycopg
 
 from chesstrove import db
-from chesstrove.detectors import Detector, Event, select
-from chesstrove.models import CanonicalGame, MoveFacts
-from chesstrove.reconstruction import replay
+from chesstrove.detectors import Detector, select
+from chesstrove.indexing import analyze, event_rows  # noqa: F401 (analyze is also imported from here)
 
 BATCH_SIZE = 500  # games per transaction
 
@@ -22,17 +21,6 @@ class Run:
     @property
     def versions(self) -> dict[str, int]:
         return {d.id: d.version for d in self.detectors}
-
-
-def analyze(game: CanonicalGame, detectors: Sequence[Detector]) -> tuple[list[MoveFacts], list[tuple[Detector, Event]]]:
-    """One replay; every detector sees every ply."""
-    facts: list[MoveFacts] = []
-    events: list[tuple[Detector, Event]] = []
-    for ctx in replay(game):
-        facts.append(ctx.facts)
-        for detector in detectors:
-            events.extend((detector, e) for e in detector.detect(ctx))
-    return facts, events
 
 
 @contextmanager
@@ -78,7 +66,7 @@ def reanalyze(
             game_ids = [row["id"] for row in rows]
             with conn.transaction():
                 db.delete_events(conn, game_ids, list(run.versions))
-                found = [(row["id"], analyze(db.game_from_row(row), run.detectors)[1]) for row in rows]
+                found = [(row["id"], event_rows(analyze(db.game_from_row(row), run.detectors)[1])) for row in rows]
                 db.insert_events(conn, run.id, found)
                 events_created = sum(len(events) for _, events in found)
                 db.mark_analyzed(conn, game_ids, run.versions)

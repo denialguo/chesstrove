@@ -3,7 +3,7 @@
 import os
 from collections.abc import Iterable
 from dataclasses import fields
-from datetime import date
+from datetime import UTC, date, datetime
 from functools import cache
 from importlib.resources import files
 from pathlib import Path
@@ -149,6 +149,17 @@ def latest_import(conn: psycopg.Connection, source: str, source_ref: str) -> dic
                         (source, source_ref)).fetchone()
 
 
+def touch_browser_import(conn: psycopg.Connection, import_id: int, month_done: str | None = None) -> None:
+    """A browser import just delivered a batch: note when, and add a finished month to resume_state.months_done."""
+    conn.execute(
+        """UPDATE imports SET resume_state = resume_state || jsonb_build_object('last_seen', %(now)s::text)
+             || CASE WHEN %(month)s::text IS NULL THEN '{}'::jsonb ELSE jsonb_build_object('months_done',
+                  (SELECT jsonb_agg(DISTINCT x ORDER BY x) FROM jsonb_array_elements_text(
+                     coalesce(resume_state->'months_done', '[]'::jsonb) || to_jsonb(%(month)s::text)) AS x)) END
+           WHERE id = %(id)s""",
+        {"now": datetime.now(UTC).isoformat(), "month": month_done, "id": import_id})
+
+
 def fail_running_imports(conn: psycopg.Connection, reason: str) -> None:
     conn.execute("""UPDATE imports SET status = 'failed', finished_at = now(), errors = errors || %s
                     WHERE status = 'running'""", (Jsonb([{"error": reason}]),))
@@ -189,21 +200,15 @@ def existing_game_keys(conn: psycopg.Connection, keys: list[str]) -> set[str]:
     return {r["source_key"] for r in rows}
 
 
-def insert_moves(conn: psycopg.Connection, games: list[tuple[int, list[MoveFacts]]]) -> None:
-    """(game id, facts) pairs, all in one COPY, one packed row per game (schema.sql: game_moves)."""
-    games = [(game_id, facts) for game_id, facts in games if facts]
+def insert_moves(conn: psycopg.Connection, games: list[tuple[int, dict | None]]) -> None:
+    """(game id, packed row from indexing.pack_moves) pairs, all in one COPY. None = a game without moves."""
+    games = [(game_id, packed) for game_id, packed in games if packed]
     if not games:
         return
+    columns = GAME_MOVES_COLUMNS.split(", ")[1:]
     with conn.cursor().copy(f"COPY game_moves ({GAME_MOVES_COLUMNS}) FROM STDIN") as copy:
-        for game_id, facts in games:
-            copy.write_row((
-                game_id, facts[0].color, " ".join(f.uci for f in facts), " ".join(f.san for f in facts),
-                "".join(f.piece for f in facts), "".join(f.captured or "." for f in facts),
-                "".join(f.promotion or "." for f in facts),
-                [f.is_check + 2 * f.is_checkmate + 4 * f.is_castling + 8 * f.is_en_passant for f in facts],
-                [f.material_white for f in facts], [f.material_black for f in facts],
-                [f.queens_after for f in facts], [f.legal_moves_before for f in facts],
-            ))
+        for game_id, packed in games:
+            copy.write_row((game_id, *(packed[c] for c in columns)))
 
 
 def positions(conn: psycopg.Connection, game_ids: Iterable[int]) -> dict[int, list[str]]:
@@ -294,15 +299,15 @@ def get_analysis_run(conn: psycopg.Connection, run_id: int) -> dict | None:
     return conn.execute("SELECT * FROM analysis_runs WHERE id = %s", (run_id,)).fetchone()
 
 
-def insert_events(conn: psycopg.Connection, run_id: int, games: list[tuple[int, list[tuple[Any, Any]]]]) -> None:
-    """(game id, [(detector, Event)]) pairs, all in one COPY. Most games have none, so skip it then."""
+def insert_events(conn: psycopg.Connection, run_id: int, games: list[tuple[int, list[dict]]]) -> None:
+    """(game id, [event row from indexing.event_rows]) pairs, all in one COPY. Most games have none."""
     if not any(events for _, events in games):
         return
     with conn.cursor().copy(f"COPY events ({EVENT_COLUMNS}) FROM STDIN") as copy:
         for game_id, events in games:
-            for detector, e in events:
-                copy.write_row((game_id, e.ply, e.type, detector.id, detector.version, e.color, e.fen,
-                                Jsonb(e.metadata), run_id))
+            for e in events:
+                copy.write_row((game_id, e["ply"], e["type"], e["detector_id"], e["detector_version"], e["color"],
+                                e["fen"], Jsonb(e["metadata"]), run_id))
 
 
 def delete_events(conn: psycopg.Connection, game_ids: list[int], detector_ids: list[str]) -> None:

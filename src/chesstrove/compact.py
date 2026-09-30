@@ -16,7 +16,7 @@ from typing import Any, Callable
 import psycopg
 
 from chesstrove import db
-from chesstrove.analysis import analyze
+from chesstrove.indexing import analyze, pack_moves
 from chesstrove.importers.pgn import ParseFailure, read_pgn
 
 PACKED_BYTES_PER_PLY = 22  # measured: 131.6 MB of game_moves for 6,239,220 plies (heap, TOAST and index)
@@ -155,7 +155,7 @@ def rebuild(conn, batch: int = BATCH, log: Callable[[str], None] = print) -> Non
             if len(items) != 1 or isinstance(items[0], ParseFailure):
                 log(f"game {r['id']}: its PGN doesn't parse; left without moves")
                 continue
-            packed.append((r["id"], analyze(items[0], ())[0]))
+            packed.append((r["id"], pack_moves(analyze(items[0], ())[0])))
         with conn.transaction():
             db.insert_moves(conn, packed)
         done += len(packed)

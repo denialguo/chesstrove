@@ -13,6 +13,8 @@ export interface Motif { type: string; mine: number; against: number; forms?: Pa
 export interface Import {
   id: number; status: "running" | "completed" | "failed"; finished_at: string | null; games_expected: number | null; games_seen: number; games_imported: number;
   games_duplicate: number; games_failed: number; games_skipped: number; errors: { error: string }[];
+  /** Browser indexing sessions: client "browser" and when the last batch arrived. */
+  resume_state?: { client?: string; last_seen?: string; months_done?: string[] } | null;
 }
 export interface PlayerSummary {
   platform: Platform; username: string; display_name: string | null; games: number; positions: number;
@@ -79,7 +81,16 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 const qs = (params: Record<string, string | number | boolean | undefined>) =>
   new URLSearchParams(Object.entries(params).filter(([, v]) => v !== undefined).map(([k, v]) => [k, String(v)])).toString();
 
+export type IndexingSession =
+  | { mode: "index"; import_id: number; token: string; months_done: string[]; versions: Record<string, number>; max_games: number }
+  | { mode: "watch" | "done"; import_id: number };
+
 export const api = {
+  /** Start (or carry on with) indexing a Chess.com history in this browser (web/src/indexer). */
+  startIndexing: (username: string, resume?: { import_id: number; token: string }) =>
+    request<IndexingSession>("/indexing/chesscom", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ username, ...resume }),
+    }),
   player: (p: Platform, u: string) => request<PlayerSummary>(`/players/${p}/${encodeURIComponent(u)}`),
   startImport: (p: Platform, u: string) =>
     request<{ import_id: number }>(`/imports/${p}`, {

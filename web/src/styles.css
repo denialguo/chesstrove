@@ -507,3 +507,4 @@ button.plunger:hover { background: var(--brass-hi); }
 .ledger--named .ledger__row:not(.ledger__row--open) .ledger__def { display: none; }
 .ledger--named .ledger__row--open { grid-column: 1 / -1; }
 @media (max-width: 860px) { .ledger--named .ledger__rows { grid-template-columns: 1fr; } }
+.index-saving { color: var(--on-walnut-3); }
