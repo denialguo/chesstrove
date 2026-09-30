@@ -124,20 +124,20 @@ def test_dropped_stream_keeps_committed_progress(conn, monkeypatch):
 
 def test_game_that_raises_is_retried(conn, monkeypatch):
     monkeypatch.setattr(ingest, "BATCH_SIZE", 1)
-    real_store_game = ingest.store_game
+    real_replay = ingest.replay_game
 
-    def flaky(conn, game, import_id, run):
+    def flaky(game, run):
         if game.source_key == "lichess:game0002":
             raise RuntimeError("transient")
-        return real_store_game(conn, game, import_id, run)
+        return real_replay(game, run)
 
     games = [lichess_game(1, 1000), lichess_game(2, 2000), lichess_game(3, 3000)]
-    monkeypatch.setattr(ingest, "store_game", flaky)
+    monkeypatch.setattr(ingest, "replay_game", flaky)
     imp = db.get_import(conn, import_lichess(conn, "alice", open_stream=FakeLichess(games)))
     assert (imp["status"], imp["games_imported"], imp["games_failed"]) == ("completed", 2, 1)
     assert checkpoint(conn) == 1001  # held before the failed game
 
-    monkeypatch.setattr(ingest, "store_game", real_store_game)
+    monkeypatch.setattr(ingest, "replay_game", real_replay)
     imp = db.get_import(conn, import_lichess(conn, "alice", open_stream=FakeLichess(games)))
     assert (imp["games_imported"], imp["games_duplicate"]) == (1, 1) and checkpoint(conn) == 3001
 

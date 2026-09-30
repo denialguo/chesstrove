@@ -92,3 +92,14 @@ def test_cli_import_and_show(dsn, conn, tmp_path, monkeypatch, capsys):
     assert main(["game", "1"]) == 0
     assert "Qxf7#" in capsys.readouterr().out
     assert main(["game", "999"]) == 1
+
+
+def test_game_the_database_refuses_is_skipped_and_the_rest_of_the_batch_stored(conn):
+    [a] = read_pgn(GAME_A)
+    [b] = read_pgn(GAME_B)
+    fields = {s: getattr(b, s) for s in CanonicalGame.__slots__}
+    refused = CanonicalGame(**fields | {"source_key": "pgn:nul", "pgn": b.pgn + "\x00"})  # text can't hold NUL
+    imp = db.get_import(conn, run_import(conn, [a, refused, b], "pgn", "test"))
+    assert (imp["games_imported"], imp["games_failed"]) == (2, 1)
+    assert imp["errors"][0]["index"] == 2
+    assert count(conn, "games") == 2 and count(conn, "moves") == len(a.moves_uci) + len(b.moves_uci)

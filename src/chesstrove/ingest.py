@@ -140,45 +140,84 @@ def store_items(
     """
     crashed = 0
     for batch in itertools.batched(enumerate(items, start=1), BATCH_SIZE):
-        imported = duplicate = skipped = events = 0
-        stored_ids: list[int] = []
+        skipped = 0
         errors: list[dict] = []
-        with conn.transaction():
-            for index, item in batch:
-                if isinstance(item, ParseFailure):
-                    if item.skipped:
-                        skipped += 1
-                    else:
-                        errors.append({**(context or {}), "index": index, "error": item.error})
-                    continue
-                try:
-                    with conn.transaction():  # savepoint: a failure discards only this game
-                        stored = store_game(conn, item, import_id, run)
-                    if stored is None:
-                        duplicate += 1
-                    else:
-                        imported += 1
-                        stored_ids.append(stored[0])
-                        events += stored[1]
-                except psycopg.OperationalError:
-                    raise  # the connection is gone; per-game handling can't help
-                except Exception as e:
-                    crashed += 1
-                    errors.append({**(context or {}), "index": index, "error": f"{type(e).__name__}: {e}"})
-            db.mark_analyzed(conn, stored_ids, run.versions)
-            db.record_progress(conn, import_id, len(batch), imported, duplicate, len(errors), errors, skipped)
-            db.record_run_progress(conn, run.id, imported, events)
+        games: list[tuple[int, CanonicalGame]] = []
+        for index, item in batch:
+            if isinstance(item, ParseFailure):
+                if item.skipped:
+                    skipped += 1
+                else:
+                    errors.append({**(context or {}), "index": index, "error": item.error})
+            else:
+                games.append((index, item))
+        try:
+            with conn.transaction():
+                stored_ids, events, duplicate, failed = store_batch(conn, games, import_id, run, context)
+                _finish_batch(conn, import_id, run, len(batch), stored_ids, events, duplicate, skipped, errors + failed)
+        except psycopg.OperationalError:
+            raise  # the connection is gone; per-game handling can't help
+        except Exception:
+            # the database refused something in the batch: redo it one game at a time to find it
+            with conn.transaction():
+                stored_ids, events, duplicate, failed = store_one_by_one(conn, games, import_id, run, context)
+                _finish_batch(conn, import_id, run, len(batch), stored_ids, events, duplicate, skipped, errors + failed)
+        crashed += len(failed)
     return crashed
 
 
-def store_game(conn: psycopg.Connection, game: CanonicalGame, import_id: int | None, run: Run) -> tuple[int, int] | None:
-    """Persist one game, its moves and its events from a single replay.
-    Returns (game id, event count), or None if the game was already stored.
-    The caller records it in game_analysis (once per batch)."""
-    game_id = db.insert_game(conn, game, import_id)
-    if game_id is None:
-        return None
-    facts, events = analyze(game, run.detectors)
-    db.insert_moves(conn, game_id, facts)
-    db.insert_events(conn, game_id, run.id, events)
-    return game_id, len(events)
+def _finish_batch(conn, import_id, run, seen, stored_ids, events, duplicate, skipped, errors) -> None:
+    db.mark_analyzed(conn, stored_ids, run.versions)
+    db.record_progress(conn, import_id, seen, len(stored_ids), duplicate, len(errors), errors, skipped)
+    db.record_run_progress(conn, run.id, len(stored_ids), events)
+
+
+def store_batch(
+    conn: psycopg.Connection, games: list[tuple[int, CanonicalGame]], import_id: int | None, run: Run,
+    context: dict | None = None,
+) -> tuple[list[int], int, int, list[dict]]:
+    """Dedupe, replay and write a batch in a handful of statements, whatever its size: the hosted database is
+    tens of milliseconds away, and a few statements per game made a 3,700-game import take half an hour.
+    A game that fails to replay is recorded and left out. Returns (stored ids, events, duplicates, errors)."""
+    known = db.existing_game_keys(conn, [g.source_key for _, g in games])
+    new: dict[str, tuple[CanonicalGame, list, list]] = {}
+    duplicate, errors = 0, []
+    for index, game in games:
+        if game.source_key in known or game.source_key in new:
+            duplicate += 1
+            continue
+        try:
+            new[game.source_key] = (game, *replay_game(game, run))
+        except Exception as e:
+            errors.append({**(context or {}), "index": index, "error": f"{type(e).__name__}: {e}"})
+    ids = db.insert_games(conn, [g for g, _, _ in new.values()], import_id)  # a key stored meanwhile is left out
+    duplicate += len(new) - len(ids)
+    db.insert_moves(conn, [(ids[k], facts) for k, (_, facts, _) in new.items() if k in ids])
+    db.insert_events(conn, run.id, [(ids[k], events) for k, (_, _, events) in new.items() if k in ids])
+    return list(ids.values()), sum(len(new[k][2]) for k in ids), duplicate, errors
+
+
+def store_one_by_one(
+    conn: psycopg.Connection, games: list[tuple[int, CanonicalGame]], import_id: int | None, run: Run,
+    context: dict | None = None,
+) -> tuple[list[int], int, int, list[dict]]:
+    """The slow path, a savepoint per game, for a batch the database refused as a whole."""
+    stored_ids, events, duplicate, errors = [], 0, 0, []
+    for index, game in games:
+        try:
+            with conn.transaction():
+                ids, n, dup, failed = store_batch(conn, [(index, game)], import_id, run, context)
+        except psycopg.OperationalError:
+            raise
+        except Exception as e:
+            ids, n, dup, failed = [], 0, 0, [{**(context or {}), "index": index, "error": f"{type(e).__name__}: {e}"}]
+        stored_ids += ids
+        events += n
+        duplicate += dup
+        errors += failed
+    return stored_ids, events, duplicate, errors
+
+
+def replay_game(game: CanonicalGame, run: Run) -> tuple[list, list]:
+    """One replay: the move facts to store and the detector events. Tests patch this to make a game fail."""
+    return analyze(game, run.detectors)

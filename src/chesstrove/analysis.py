@@ -76,13 +76,11 @@ def reanalyze(
         after = 0
         while rows := db.games_to_analyze(conn, run.versions, after, BATCH_SIZE, stale_only=not force):
             game_ids = [row["id"] for row in rows]
-            events_created = 0
             with conn.transaction():
                 db.delete_events(conn, game_ids, list(run.versions))
-                for row in rows:
-                    _, events = analyze(db.game_from_row(row), run.detectors)
-                    db.insert_events(conn, row["id"], run.id, events)
-                    events_created += len(events)
+                found = [(row["id"], analyze(db.game_from_row(row), run.detectors)[1]) for row in rows]
+                db.insert_events(conn, run.id, found)
+                events_created = sum(len(events) for _, events in found)
                 db.mark_analyzed(conn, game_ids, run.versions)
                 db.record_run_progress(conn, run.id, len(rows), events_created)
             after = game_ids[-1]

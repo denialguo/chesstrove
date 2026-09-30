@@ -149,32 +149,51 @@ def fail_running_imports(conn: psycopg.Connection, reason: str) -> None:
 
 # --- games & moves -------------------------------------------------------------------------------
 
+GAME_COLUMNS = ("source_key, source, external_id, import_id, played_at, white, black, white_rating, black_rating, "
+                "result, time_control, rated, eco, opening, initial_fen, chess960, ply_count, pgn")
+
+
+def _game_row(g: CanonicalGame, import_id: int | None) -> tuple:
+    return (g.source_key, g.source, g.external_id, import_id, g.played_at, g.white, g.black,
+            g.white_rating, g.black_rating, g.result, g.time_control, g.rated, g.eco, g.opening,
+            g.initial_fen, g.chess960, len(g.moves_uci), g.pgn)
+
+
 def insert_game(conn: psycopg.Connection, g: CanonicalGame, import_id: int | None) -> int | None:
     """Insert a game; returns its id, or None if a game with the same source_key already exists."""
-    row = conn.execute(
-        """INSERT INTO games (source_key, source, external_id, import_id, played_at, white, black,
-                              white_rating, black_rating, result, time_control, rated, eco, opening,
-                              initial_fen, chess960, ply_count, pgn)
-           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-           ON CONFLICT (source_key) DO NOTHING
-           RETURNING id""",
-        (g.source_key, g.source, g.external_id, import_id, g.played_at, g.white, g.black,
-         g.white_rating, g.black_rating, g.result, g.time_control, g.rated, g.eco, g.opening,
-         g.initial_fen, g.chess960, len(g.moves_uci), g.pgn),
-    ).fetchone()
-    return row["id"] if row else None
+    return insert_games(conn, [g], import_id).get(g.source_key)
 
 
-def insert_moves(conn: psycopg.Connection, game_id: int, facts: list[MoveFacts]) -> None:
-    if not facts:
+def insert_games(conn: psycopg.Connection, games: list[CanonicalGame], import_id: int | None) -> dict[str, int]:
+    """Insert games in one statement; returns {source_key: id} for the ones that weren't already stored."""
+    if not games:
+        return {}
+    one = "(" + ", ".join(["%s"] * 18) + ")"
+    rows = conn.execute(
+        f"""INSERT INTO games ({GAME_COLUMNS}) VALUES {", ".join([one] * len(games))}
+            ON CONFLICT (source_key) DO NOTHING RETURNING id, source_key""",
+        [v for g in games for v in _game_row(g, import_id)],
+    ).fetchall()
+    return {r["source_key"]: r["id"] for r in rows}
+
+
+def existing_game_keys(conn: psycopg.Connection, keys: list[str]) -> set[str]:
+    rows = conn.execute("SELECT source_key FROM games WHERE source_key = ANY(%s)", (keys,)).fetchall()
+    return {r["source_key"] for r in rows}
+
+
+def insert_moves(conn: psycopg.Connection, games: list[tuple[int, list[MoveFacts]]]) -> None:
+    """(game id, facts) pairs, all in one COPY."""
+    if not any(facts for _, facts in games):
         return
     with conn.cursor().copy(f"COPY moves ({MOVE_COLUMNS}) FROM STDIN") as copy:
-        for f in facts:
-            copy.write_row((
-                game_id, f.ply, f.color, f.san, f.uci, f.piece, f.captured, f.promotion, f.is_check,
-                f.is_checkmate, f.is_castling, f.is_en_passant, f.fen_after, f.material_white,
-                f.material_black, f.queens_after, f.legal_moves_before,
-            ))
+        for game_id, facts in games:
+            for f in facts:
+                copy.write_row((
+                    game_id, f.ply, f.color, f.san, f.uci, f.piece, f.captured, f.promotion, f.is_check,
+                    f.is_checkmate, f.is_castling, f.is_en_passant, f.fen_after, f.material_white,
+                    f.material_black, f.queens_after, f.legal_moves_before,
+                ))
 
 
 # A game's platform is the prefix of its dedupe key (chesscom:/lichess:), so it also covers games that
@@ -235,14 +254,15 @@ def get_analysis_run(conn: psycopg.Connection, run_id: int) -> dict | None:
     return conn.execute("SELECT * FROM analysis_runs WHERE id = %s", (run_id,)).fetchone()
 
 
-def insert_events(conn: psycopg.Connection, game_id: int, run_id: int, events: list[tuple[Any, Any]]) -> None:
-    """events: (detector, Event) pairs. Most games have none, so skip the COPY round trips then."""
-    if not events:
+def insert_events(conn: psycopg.Connection, run_id: int, games: list[tuple[int, list[tuple[Any, Any]]]]) -> None:
+    """(game id, [(detector, Event)]) pairs, all in one COPY. Most games have none, so skip it then."""
+    if not any(events for _, events in games):
         return
     with conn.cursor().copy(f"COPY events ({EVENT_COLUMNS}) FROM STDIN") as copy:
-        for detector, e in events:
-            copy.write_row((game_id, e.ply, e.type, detector.id, detector.version, e.color, e.fen,
-                            Jsonb(e.metadata), run_id))
+        for game_id, events in games:
+            for detector, e in events:
+                copy.write_row((game_id, e.ply, e.type, detector.id, detector.version, e.color, e.fen,
+                                Jsonb(e.metadata), run_id))
 
 
 def delete_events(conn: psycopg.Connection, game_ids: list[int], detector_ids: list[str]) -> None:
