@@ -1,6 +1,7 @@
 """Import pipeline: source -> CanonicalGame -> one-pass replay -> games + moves rows."""
 
 import itertools
+import urllib.error
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -16,6 +17,7 @@ from chesstrove.importers.pgn import ParseFailure, read_pgn
 from chesstrove.models import CanonicalGame
 
 BATCH_SIZE = 500  # games per transaction
+RECONNECTS = 3  # Lichess stream drops in a row without progress before an import gives up
 
 
 def import_pgn(conn: psycopg.Connection, text: str, source_ref: str, import_id: int | None = None) -> int:
@@ -86,29 +88,40 @@ def import_lichess(
     """
     username = username.lower()
     account_id = db.ensure_account(conn, user, "lichess", username)
-    since = checkpoint = db.lichess_checkpoint(conn, username)
+    checkpoint = db.lichess_checkpoint(conn, username)
     frozen = False  # once set, the checkpoint stays put for the rest of this run
 
     with tracked_import(conn, "lichess", username, account_id, import_id) as import_id, tracked_run(conn) as run:
         db.set_resume_state(conn, import_id, {"since": checkpoint})
-        for chunk in itertools.batched(lichess.stream_games(username, since, open_stream), BATCH_SIZE):
-            items = []
-            chunk_checkpoint = checkpoint
-            for game in chunk:
-                if lichess.is_ongoing(game):
-                    if not frozen:
-                        chunk_checkpoint = min(chunk_checkpoint, game["createdAt"])  # games arrive oldest first
-                    frozen = True
-                    continue
-                items.append(lichess.to_item(game))
-                if not frozen:
-                    chunk_checkpoint = game["createdAt"] + 1
-            crashed = store_items(conn, import_id, run, items)
-            if crashed:
-                frozen = True
-            else:
-                checkpoint = chunk_checkpoint
-            db.set_resume_state(conn, import_id, {"since": checkpoint})
+        drops = 0
+        while True:
+            start = checkpoint
+            try:
+                for chunk in itertools.batched(lichess.stream_games(username, checkpoint, open_stream), BATCH_SIZE):
+                    items = []
+                    chunk_checkpoint = checkpoint
+                    for game in chunk:
+                        if lichess.is_ongoing(game):
+                            if not frozen:
+                                chunk_checkpoint = min(chunk_checkpoint, game["createdAt"])  # games arrive oldest first
+                            frozen = True
+                            continue
+                        items.append(lichess.to_item(game))
+                        if not frozen:
+                            chunk_checkpoint = game["createdAt"] + 1
+                    crashed = store_items(conn, import_id, run, items)
+                    if crashed:
+                        frozen = True
+                    else:
+                        checkpoint = chunk_checkpoint
+                    db.set_resume_state(conn, import_id, {"since": checkpoint})
+                break
+            except lichess.STREAM_DROPS as e:
+                # A long history streams for many minutes, and Lichess can drop a slow reader (a read timeout, or a
+                # line cut off mid-JSON). Reconnect from the checkpoint; give up only when drops stop making progress.
+                drops = 0 if checkpoint > start else drops + 1
+                if isinstance(e, urllib.error.HTTPError) or drops >= RECONNECTS:
+                    raise
     return import_id
 
 

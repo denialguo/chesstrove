@@ -7,6 +7,7 @@ Anonymous exports stream ~20 games/s; set LICHESS_TOKEN (any personal token) for
 Lichess allows one request at a time and asks clients to wait a full minute after a 429.
 """
 
+import http.client
 import json
 import os
 import time
@@ -27,6 +28,8 @@ ONGOING = ("created", "started")
 RATE_LIMIT_WAIT = 60  # seconds, per Lichess API guidelines
 
 OpenStream = Callable[[str], Iterable[dict]]
+# A stream that broke partway (OSError covers timeouts and resets; ValueError, a line cut off mid-JSON).
+STREAM_DROPS = (OSError, http.client.HTTPException, ValueError)
 
 
 NOT_GAMES = ("puzzle", "storm", "racer", "streak")  # perfs that aren't played games

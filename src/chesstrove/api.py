@@ -11,6 +11,7 @@ import logging
 import os
 import threading
 import time
+import urllib.error
 from collections import defaultdict, deque
 from collections.abc import Iterator
 from contextlib import asynccontextmanager
@@ -134,23 +135,22 @@ class IndexingStart(BaseModel):
 
 
 @api.post("/indexing/chesscom")
-def start_indexing(body: IndexingStart, request: Request, background: BackgroundTasks, c: Conn) -> dict:
+def start_indexing(body: IndexingStart, request: Request, c: Conn) -> dict:
     """Start (or adopt) indexing a Chess.com history in this browser. See browser_import.start."""
     ip = _client_ip(request)
     resume = (body.import_id, body.token) if body.import_id and body.token else None
+    found: list[dict | None] = []
+
+    def allow() -> bool:  # asked only when a new import is about to be created
+        found.append(profile("chesscom", body.username))
+        return not PUBLIC or _allow(ip)
     try:
-        res = browser_import.start(c, body.username, allow=lambda: not PUBLIC or _allow(ip), resume=resume)
+        res = browser_import.start(c, body.username, allow=allow, resume=resume)
     except browser_import.Rejected as e:
         raise _rejected(e) from None
-    if res["mode"] == "index" and not resume:  # the platform's game count, for progress; one request, off the response path
-        background.add_task(_set_profile, "chesscom", body.username.lower(), res["import_id"])
+    if found and found[0] is not None:  # the platform's game count, for progress
+        db.set_profile(c, res["import_id"], found[0])
     return res
-
-
-def _set_profile(source: str, username: str, import_id: int) -> None:
-    if (found := profile(source, username)) is not None:
-        with db.connect() as c:
-            db.set_profile(c, import_id, found)
 
 
 @api.post("/indexing/{import_id}/batches")
@@ -265,27 +265,29 @@ def _start_account_import(c, request: Request, background: BackgroundTasks, sour
     if latest and (latest["status"] == "running" or latest["status"] == "completed"
                    and latest["finished_at"] > datetime.now(UTC) - FRESH):
         return {"import_id": latest["id"], "status": latest["status"]}  # one import per account at a time
+    found = profile(source, username)  # before the rate limit: a mistyped name costs no import
     if PUBLIC and not _allow(_client_ip(request)):
         raise HTTPException(429, "too many imports from here; try again in an hour")
     import_id = db.start_import(c, source, username)
+    if found is not None:  # the platform's game count, so the page can show it while the import waits for a slot
+        db.set_profile(c, import_id, found)
     background.add_task(_queued, source, job, username, "me" if PUBLIC else body.user, import_id=import_id)
     return {"import_id": import_id, "status": "running"}
 
 
 def profile(source: str, username: str) -> dict | None:
-    """What the platform says about the player (game count, current rating), or None if it won't say."""
+    """What the platform says about the player (game count, current rating), or None if it won't say.
+    A player the platform doesn't know is a 404 here, before any import is created."""
     try:
         return (chesscom.profile if source == "chesscom" else lichess.profile)(username)
-    except Exception:  # only a progress hint: never let it stop an import
+    except Exception as e:  # otherwise only a progress hint: never let it stop an import
+        if isinstance(e, urllib.error.HTTPError) and e.code == 404:
+            raise HTTPException(404, "no such player") from None
         log.warning("no game count for %s:%s", source, username, exc_info=True)
         return None
 
 
 def _queued(source: str, job, username: str, *args, **kwargs) -> None:
-    # the total first, so the page can show it while the import waits for a slot
-    if (found := profile(source, username)) is not None:
-        with db.connect() as c:
-            db.set_profile(c, kwargs["import_id"], found)
     with IMPORT_SLOTS[source]:  # waits while the others finish; the row already says "running"
         _in_new_connection(job, username, *args, **kwargs)
 

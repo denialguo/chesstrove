@@ -10,6 +10,8 @@ from chesstrove import api, db, ingest
 from test_analysis import PGN
 from test_chesscom import ARCHIVES, fake_api
 
+platform_profile = api.profile  # the real one; the fixture stubs it
+
 
 @pytest.fixture
 def client(dsn, conn, monkeypatch):
@@ -169,3 +171,18 @@ def test_the_public_site_refuses_to_start_without_its_database(monkeypatch):
     with pytest.raises(RuntimeError, match="CHESSTROVE_DATABASE_URL"):
         with TestClient(api.app):
             pass
+
+
+def test_a_player_the_platform_doesnt_know_starts_no_import(client, conn, monkeypatch):
+    def not_found(username, *_):
+        raise urllib.error.HTTPError("u", 404, "Not Found", {}, io.BytesIO())  # type: ignore[arg-type]
+
+    monkeypatch.setattr(api, "profile", platform_profile)
+    monkeypatch.setattr(api.lichess, "profile", not_found)
+    monkeypatch.setattr(api.chesscom, "profile", not_found)
+    monkeypatch.setattr(api, "PUBLIC", True)
+    monkeypatch.setattr(api, "_recent_imports", defaultdict(deque))
+    for _ in range(api.IMPORTS_PER_IP_HOUR + 1):  # typos don't use up the hour's imports
+        assert client.post("/api/imports/lichess", json={"username": "rockingpuppy1"}).status_code == 404
+    assert client.post("/api/indexing/chesscom", json={"username": "rockingpuppy1"}).status_code == 404
+    assert conn.execute("SELECT count(*) AS n FROM imports").fetchone()["n"] == 0

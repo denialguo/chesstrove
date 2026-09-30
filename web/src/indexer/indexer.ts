@@ -1,7 +1,7 @@
 // Indexing a history on this device: owns the worker (worker.ts), talks to the API to start or carry on, and
 // keeps the session and progress in IndexedDB so a reload or a closed tab can continue instead of starting over.
 
-import { api, apiUrl, type IndexingSession } from "../lib/api";
+import { api, ApiError, apiUrl, type IndexingSession } from "../lib/api";
 import { DUTY, type FromWorker, type Progress, type Start, type StartDeep } from "./protocol";
 
 const BATCH = 100; // games per upload: ~0.5 MB, one short transaction server-side
@@ -79,6 +79,7 @@ export class Indexer {
     try {
       session = await api.startIndexing(this.username, saved ? { import_id: saved.importId, token: saved.token } : undefined);
     } catch (e) {
+      if (e instanceof ApiError && e.status === 404) { this.set({ status: "idle" }); throw e; } // no such player: the page says so
       this.set({ status: "error", error: e instanceof Error && /429/.test(e.message)
         ? "Too many imports from your connection in the last hour. Try again later." : "ChessTrove's server didn't answer.", retry: true });
       return "watch";

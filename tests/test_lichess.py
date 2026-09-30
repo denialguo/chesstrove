@@ -108,13 +108,30 @@ def test_ongoing_game_holds_the_checkpoint(conn):
     assert checkpoint(conn) == 3001 and count(conn, "games") == 3
 
 
-def test_dropped_stream_keeps_committed_progress(conn, monkeypatch):
+def test_dropped_stream_reconnects_from_the_checkpoint(conn, monkeypatch):
+    monkeypatch.setattr(ingest, "BATCH_SIZE", 1)
+    games = [lichess_game(i, i * 1000) for i in range(1, 6)]
+    api = FakeLichess(games, fail_after=2)  # every connection drops after 2 games
+    imp = db.get_import(conn, import_lichess(conn, "alice", open_stream=api))
+    assert imp["status"] == "completed" and imp["games_imported"] == 5 and count(conn, "games") == 5
+    assert [api.since_of(u) for u in api.urls] == [0, 2001, 4001]
+
+
+def test_a_stream_that_keeps_dropping_fails_but_keeps_progress(conn, monkeypatch):
     monkeypatch.setattr(ingest, "BATCH_SIZE", 1)
     games = [lichess_game(i, i * 1000) for i in range(1, 5)]
-    with pytest.raises(ConnectionResetError):
-        import_lichess(conn, "alice", open_stream=FakeLichess(games, fail_after=2))
+    api = FakeLichess(games)
+
+    def dies_after_two(url):
+        if api.since_of(url) > 0:
+            raise TimeoutError("The read operation timed out")
+        yield from list(api(url))[:2]
+        raise ValueError("Expecting value: line 1 column 486")  # a line cut off mid-JSON
+
+    with pytest.raises(TimeoutError):
+        import_lichess(conn, "alice", open_stream=dies_after_two)
     [imp] = db.list_imports(conn)
-    assert imp["status"] == "failed" and "stream dropped" in imp["errors"][-1]["error"]
+    assert imp["status"] == "failed" and "timed out" in imp["errors"][-1]["error"]
     assert count(conn, "games") == 2 and checkpoint(conn) == 2001
 
     api = FakeLichess(games)

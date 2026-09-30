@@ -69,7 +69,12 @@ export function Player() {
           const saved = await ix.init();
           if (saved && last?.id === saved.importId) return setAsk("continue"); // this browser's own unfinished session
           if (touch() && s.games === 0) return setAsk("confirm");            // phones: only when asked
-          await ix.start();
+          try {
+            await ix.start();
+          } catch (e) {
+            if (s.games === 0) throw e; // no such player (any more): with games stored, the page is still worth showing
+            return;
+          }
           setSummary(await api.player(platform, username));
           return;
         }
@@ -82,7 +87,8 @@ export function Player() {
         setSummary(await api.player(platform, username));
       }
     } catch (e) {
-      setError(e instanceof ApiError && e.status === 422 ? "That isn't a valid username."
+      setError(e instanceof ApiError && e.status === 404 ? "missing"
+        : e instanceof ApiError && e.status === 422 ? "That isn't a valid username."
         : e instanceof ApiError && e.status === 429 ? "Too many imports from your connection in the last hour. Try again later."
         : "down");
     }
@@ -92,7 +98,11 @@ export function Player() {
 
   const indexHere = async () => {
     setAsk(null);
-    await ix?.start();
+    try {
+      await ix?.start();
+    } catch {
+      return setError("missing"); // start only throws for a player Chess.com doesn't know
+    }
     load();
   };
 
@@ -118,17 +128,26 @@ export function Player() {
     return <Shell><div className="empty"><h1>Unknown site.</h1><p>ChessTrove reads Chess.com and Lichess.</p></div></Shell>;
   }
   if (error === "down") return <Shell><Unreachable onRetry={() => setAttempt((a) => a + 1)} /></Shell>;
+  const noSuchPlayer = (
+    <Shell>
+      <div className="empty">
+        <h1>No {PLATFORM_NAME[platform]} player called “{username}”.</h1>
+        <p>Check the spelling, or try the other site.</p>
+      </div>
+    </Shell>
+  );
+  if (error === "missing") return noSuchPlayer;
   if (error) return <Shell><div className="empty"><h1>Couldn’t load this player.</h1><p>{error}</p></div></Shell>;
   if (!summary) return <Shell><Waiting>Opening {username}…</Waiting></Shell>;
 
   const failed = summary.games === 0 && summary.latest_import?.status === "failed";
   if (failed) {
-    const notFound = summary.latest_import!.errors.some((e) => /404/.test(e.error));
+    if (summary.latest_import!.errors.some((e) => /404/.test(e.error))) return noSuchPlayer; // imports from before the name check
     return (
       <Shell>
         <div className="empty">
-          <h1>{notFound ? `No ${PLATFORM_NAME[platform]} player called “${username}”.` : "The import stopped."}</h1>
-          <p>{notFound ? "Check the spelling, or try the other site." : `${PLATFORM_NAME[platform]} didn’t return this player’s games. Try again later.`}</p>
+          <h1>The import stopped.</h1>
+          <p>{PLATFORM_NAME[platform]} didn’t return this player’s games. Try again later.</p>
         </div>
       </Shell>
     );
