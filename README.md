@@ -1,10 +1,30 @@
 # ChessTrove
 
-ChessTrove indexes your entire Chess.com/Lichess history (or any PGN) so you can uncover rare motifs, unusual
-positions, engine insights, and recurring patterns across every game you've played.
+**Live: [chesstrove.tech](https://chesstrove.tech)**
 
-Today: a deterministic index (move facts + rare-motif detectors). Planned: a persistent, resumable Stockfish
-index over every position. Design and roadmap: [ARCHITECTURE.md](ARCHITECTURE.md).
+ChessTrove indexes a player's whole Chess.com or Lichess history (or any PGN) and finds the rare moments in it:
+underpromotions, en passant mates, named checkmate patterns (smothered, Anastasia's, Arabian, …), three-queen
+positions, missed mates in one. Game sites show you one game at a time; this searches every game you've played.
+
+**How it works**
+
+- **Deterministic detectors, not an engine.** Each game is replayed once with python-chess; 29 versioned
+  detectors check each ply (28 in the first pass, plus a slower missed-mate-in-one pass that runs afterwards).
+  Detectors are pure functions of the position, so results are reproducible, and bumping a detector's version
+  reanalyses only what's stale.
+- **Indexing runs in the visitor's browser.** For Chess.com, the same Python module the server uses
+  (`src/chesstrove/indexing.py`) runs in a Web Worker under Pyodide: the browser downloads the archives,
+  analyses them and uploads finished rows. The free-tier API only checks and stores them, and it re-replays every
+  game with a rare find to confirm it. Tests assert that Pyodide's output is identical to native Python's.
+- **Compact storage.** Moves are one packed row per game (about 1.6 KB), and positions are replayed when needed
+  instead of being stored.
+- **Optional Stockfish.** Stockfish 18 (WASM) can check, in the browser, whether a player's underpromotions were
+  the only good move. Locally, `chesstrove engine analyze` runs native Stockfish over every position.
+
+Stack: Python 3.12, FastAPI, Postgres (Supabase), python-chess, Pyodide, React + Vite + TypeScript. Hosted on
+Vercel (site) and Render (API). Design notes and the detector specs: [ARCHITECTURE.md](ARCHITECTURE.md).
+
+## Run it locally
 
 ```sh
 uv sync
@@ -22,6 +42,7 @@ uv run chesstrove events --type UNDERPROMOTION
 uv run chesstrove events --type MISSED_MATE_IN_ONE --player myname --since 2024-01-01
 uv run chesstrove reanalyze                 # after bumping/adding a detector: redoes only what's stale
 uv run chesstrove serve                     # REST API on 127.0.0.1:8000, interactive docs at /docs
+(cd web && npm install && npx vite)         # the site on :5173, proxying /api to `serve`
 
 # Engine layer (needs Stockfish: brew install stockfish). Resumable; Ctrl-C keeps finished games.
 uv run chesstrove engine analyze --nodes 25000 --max-games 100   # newest games first
@@ -125,5 +146,5 @@ machine at `/lab/engine`.
 Free-tier limits:
 - Render sleeps after 15 idle minutes. The site itself still loads at once from Vercel; the first player or
   game page after that says it's waking the server, which takes about a minute.
-- Supabase pauses a project after a week without traffic, and its database is capped at 500 MB, roughly
-  25k more games beyond the current data.
+- Supabase pauses a project after a week without traffic, and its database is capped at 500 MB. At about 4.5 KB a game
+  (everything included: PGN, packed moves, analysis, indexes), that's roughly 100k games.
