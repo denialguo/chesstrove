@@ -281,7 +281,9 @@ button.plunger:hover { background: var(--brass-hi); }
 .ledger__row--empty .ledger__name, .ledger__row--empty .glyph { color: var(--on-walnut-3); }
 .ledger__row--empty .ledger__def { font-style: italic; color: var(--on-walnut-3); }
 .ledger__summary-wrap { position: relative; }
-.ledger__lock { font-family: var(--display); color: var(--on-walnut-3); }
+.ledger__lock { font-family: var(--display); color: var(--brass-lo); }
+.ledger__unlock { background: none; border: 0; padding: 0; cursor: pointer; font: inherit; font-weight: 600; font-size: 0.92rem; }
+.ledger__unlock:disabled { cursor: default; color: var(--on-walnut-3); text-decoration: none; }
 /* under the row's text: count column + gap + glyph column + gap */
 .ledger__unlock { margin: calc(-1 * var(--space-2)) 0 var(--space-4) calc(var(--space-4) + 5.5rem + var(--space-4) + 4.6rem + var(--space-4)); }
 @media (max-width: 640px) { .ledger__unlock { margin: 0 var(--space-4) var(--space-4); } }

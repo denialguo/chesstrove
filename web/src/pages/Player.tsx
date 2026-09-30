@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { ChevronDown } from "lucide-react";
+import { ArrowRight, ChevronDown } from "lucide-react";
 import { Board } from "../components/Board";
 import { Dial } from "../components/Dial";
 import { Digits } from "../components/Digits";
@@ -168,7 +168,7 @@ export function Player() {
               <MotifRow key={m.type} motif={m} mine={counts.mine} against={counts.against} platform={platform} username={username} name={name} />,
               ...(m.type === "UNDERPROMOTION" && counts.mine + counts.against > 0
                 ? [<BestUnderpromotionRow key="BEST_UNDERPROMOTION" platform={platform} username={username} name={name}
-                     total={counts.mine + counts.against} server={summary.best_underpromotions ?? null} />]
+                     mineTotal={counts.mine} againstTotal={counts.against} server={summary.best_underpromotions ?? null} />]
                 : []),
             ])}
         </ul>
@@ -250,9 +250,11 @@ function MotifRow({ motif, mine, against, forms, platform, username, name }: {
 
 /** Underpromotions that were the single best move. Needs Stockfish: the server's verdicts where ChessTrove
  * analysed the player, otherwise a one-click check in this browser (engine/underpromotions.ts). */
-function BestUnderpromotionRow({ platform, username, name, total, server }: {
-  platform: Platform; username: string; name: string; total: number; server: PlayerSummary["best_underpromotions"] | null;
+function BestUnderpromotionRow({ platform, username, name, mineTotal, againstTotal, server }: {
+  platform: Platform; username: string; name: string; mineTotal: number; againstTotal: number;
+  server: PlayerSummary["best_underpromotions"] | null;
 }) {
+  const total = mineTotal + againstTotal;
   const [saved, setSaved] = useState<UpVerdict[] | null>(null);
   const [checking, setChecking] = useState<{ done: number; total: number } | null>(null);
   const [failed, setFailed] = useState<string | null>(null);
@@ -289,13 +291,15 @@ function BestUnderpromotionRow({ platform, username, name, total, server }: {
 
   const empty = !locked && mine + against === 0;
   const panelId = "motif-BEST_UNDERPROMOTION";
+  // the same numbers as the Underpromotion row above: theirs on the left, against them on the right
+  const both = `${n(mineTotal)} by ${name}${againstTotal ? ` and ${n(againstTotal)} against` : ""}`;
   const note = !canRun && !server ? "Needs a browser that can run Stockfish."
-    : checking ? `Stockfish is checking them on this device: ${checking.done} of ${checking.total}.`
-    : locked ? `Was any of these ${plural(total, "underpromotion")} the only best move? Stockfish can check them on this device in ${roughDuration((total * 3) / 2)}.`
+    : checking ? `Stockfish is checking the underpromotions on this device: ${checking.done} of ${checking.total}.`
+    : locked ? `Stockfish can check which of the underpromotions above (${both}) was the single best move, on this device, in ${roughDuration((total * 3) / 2)}.`
     : empty ? `None of the ${plural(judged, "underpromotion")} Stockfish checked was the single best move.`
     : BEST_UNDERPROMOTION.definition;
   return (
-    <li className={`ledger__row ledger__row--derived ${empty || locked ? "ledger__row--empty" : ""} ${open ? "ledger__row--open" : ""}`}>
+    <li className={`ledger__row ledger__row--derived ${empty ? "ledger__row--empty" : ""} ${locked ? "ledger__row--locked" : ""} ${open ? "ledger__row--open" : ""}`}>
       <div className="ledger__summary-wrap">
         <button type="button" className="ledger__summary" disabled={empty || locked} aria-expanded={open} aria-controls={panelId}
           onClick={() => setOpen(!open)}>
@@ -312,8 +316,9 @@ function BestUnderpromotionRow({ platform, username, name, total, server }: {
           {!empty && !locked && <ChevronDown className="ledger__chev" size={18} aria-hidden="true" />}
         </button>
         {canRun && !server && (locked || remaining > 0) && (
-          <button type="button" className="engine-btn engine-btn--go ledger__unlock" disabled={!!checking} onClick={check}>
+          <button type="button" className="textlink ledger__unlock" disabled={!!checking} onClick={check}>
             {checking ? "Checking…" : locked ? "Check with Stockfish" : `Check the other ${remaining}`}
+            {!checking && <ArrowRight size={14} aria-hidden="true" />}
           </button>
         )}
       </div>
