@@ -48,8 +48,10 @@ The site runs on Render's free web service, with Supabase's free Postgres as the
 - It returns an account's running or just-finished import instead of starting a duplicate.
 - It limits each IP to 10 imports an hour and runs 2 Chess.com imports and 1 Lichess import at a time (`CHESSTROVE_CHESSCOM_SLOTS`, `CHESSTROVE_LICHESS_SLOTS`).
 
-Stockfish doesn't run on the host: the record book appears only for games analysed locally
-(`chesstrove engine analyze`) before being pushed up.
+Stockfish doesn't run on the host. Players analysed locally (`chesstrove engine analyze`) before being
+pushed up show that record book. Everyone else gets an offer to analyse their games in their own browser
+(Stockfish 18 WASM, results kept in the browser); see ARCHITECTURE.md, "Browser engine". Benchmark any
+machine at `/lab/engine`.
 
 Free-tier limits:
 - Render sleeps after 15 idle minutes, so the first visit after that takes about a minute to wake it.

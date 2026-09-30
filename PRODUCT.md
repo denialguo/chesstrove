@@ -35,8 +35,9 @@ missed wins, blunders) where every engine claim names the engine and settings th
 
 - Imports: Chess.com public API (monthly archives), Lichess export stream (rate-limited, ~20 games/s),
   PGN files. A 3,000-game history imports in minutes; Lichess is slower.
-- Deterministic motifs are ready as soon as games import. Engine analysis is a separate, longer pass
-  (planned to run in the visitor's browser); the product must be useful while it is partial.
+- Deterministic motifs are ready as soon as games import. Engine analysis is optional: for public players it
+  runs in the visitor's browser (Stockfish 18 WASM) only after they choose "Analyze my games", results stay
+  in their browser, and the record book fills in progressively. The product is complete without it.
 - Players verify finds by opening the original game on Chess.com/Lichess.
 
 ## Capabilities and Constraints
@@ -62,7 +63,7 @@ missed wins, blunders) where every engine claim names the engine and settings th
   Derived at query time with every threshold a parameter. Engine facts and ChessTrove's definitions are
   kept apart, and nothing is called "brilliant".
 - Usernames are unique per platform only; every player view is scoped to (platform, username).
-- Undecided: host, browser-engine rollout, rate limiting for public imports.
+- Hosting: Render (app) + Supabase (Postgres), free tiers. Undecided: a server-verified record book for browser finds.
 
 ## Brand Commitments
 

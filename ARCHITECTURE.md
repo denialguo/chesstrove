@@ -726,6 +726,101 @@ games / 58,671 positions in 78 s (748 positions/s) at 13 workers**, 243 bytes pe
 Projection for a 250k-position history at 13 workers: ~6 min at 10k nodes, ~15 min at 25k, ~1 h at
 100k (from the measured linear cost). These are projections, not promises.
 
+## Browser engine (built, opt-in)
+
+The native engine index (above) is for ChessTrove's own corpus. For public players, the server does
+imports and the deterministic analysis, and Stockfish runs in the visitor's browser. It only runs when the
+visitor asks: a player page shows the whole collection and named mates without any engine, and the record
+book starts as an offer ("Analyze my games").
+
+**Engine.** stockfish.js 18.0.8, the "lite single-threaded" WASM build (`web/public/engine/`, 7.3 MB, GPLv3).
+- It is the same Stockfish version as the native index, but a smaller network and a different build, so it
+  is its own engine configuration, never mixed with native results.
+- It is single-threaded, so it needs no SharedArrayBuffer, COOP/COEP or pthreads. It scales by running several
+  independent Web Workers instead.
+- Each search sends the game's full move history (`position ... moves ...`), so repetitions and the 50-move
+  counter count, exactly as natively; positions are never deduplicated across games. `ucinewgame` runs per
+  game, the hash is 16 MB, and scores are stored from White's point of view (`web/src/engine/uci.ts`).
+
+**What runs, in what order** (`runner.ts`):
+1. Games with deterministic events.
+2. The 100 most recent games.
+3. Everything else, newest first.
+
+The baseline is one node-limited line per position. Probes are the expensive searches, and they run only on
+candidates a finished game's baseline turns up, ahead of further baseline games:
+- **top_two** where the player played the engine's choice in a clearly winning position (the native
+  ONLY_WINNING_MOVE candidate rule);
+- **vs_queen** and **all_moves** on the player's own underpromotions.
+
+A probe keeps the deepest iteration every line finished, like `engine.run_probe`. It aims at the position's
+baseline depth (20 when the baseline found a mate), capped at 30, with a ceiling of 1M nodes per line.
+
+**Where results live.** Results stay in the visitor's IndexedDB and are never uploaded (option A: the server
+stores games, events and imports; the browser owns evaluations and discoveries).
+- Each finished game or probe is written at once, so a closed tab loses at most the game in flight. The
+  probes still to run are stored too.
+- Every key starts with the config identity: engine, build, flavour, nodes, MultiPV, hash and the probe
+  settings. Change any of them and old results are simply not read.
+- Worker count only affects speed (each worker is an independent single-threaded search), so it is not part
+  of the identity.
+- A later **server-verified** record book fits this model: re-search only the few record candidates
+  natively and store them under a native config. That would be the `client_computed` vs `server_verified`
+  distinction; it is not built.
+
+**Discoveries** (`archaeology.ts`) are the six record-book types, ported from `archaeology.py` and the SQL
+behind it.
+- `scripts/engine_parity.py` feeds the native results through the port and compares it with the server. It
+  matches on all 5,511 non-Chess960 games of the three local accounts: the same games, plies, order and
+  values, with exact ties allowed to swap (Postgres computes `exp()` in numeric, the browser in doubles).
+- Chess960 games are skipped for now.
+
+**Workers.** Balanced 2, Fast min(4, cores − 1), Max cores − 1. A constrained device gets one worker whatever
+the setting: ≤ 4 cores, ≤ 4 GB `deviceMemory`, or a coarse pointer.
+
+**Resuming.** Once a visitor has opted in on a browser, it resumes by itself on the next visit, unless they
+paused it or the device is constrained; then it waits for Resume.
+
+**Failures.** A browser without WebAssembly, Workers or IndexedDB gets a note, and an engine failure shows
+an error in the record book. The collection is unaffected either way.
+
+**Benchmark** (`/lab/engine`, fixture from `scripts/engine_fixture.py`: 106 of danksonpotato's games,
+8,357 positions, with the native results). Open it on any machine; `?auto=1` leaves the report in
+`window.__bench`. Measured in Chrome on the development machine (Apple Silicon, 14 cores).
+
+Speed, in positions a second:
+
+| Nodes | 1 worker | 2 workers | 4 workers |
+|---|---|---|---|
+| 10k | 191 | 348 | 513 (671 on the full fixture) |
+| 25k | 81 | 138 | 215 (280 on the full fixture) |
+
+Worker startup takes about 110 ms each (the WASM is cached after the first), and the main thread never
+stalled more than 2 ms.
+
+Agreement with native Stockfish 18 at 25k nodes, on all 8,304 non-terminal fixture positions:
+
+| | 10k browser | 25k browser |
+|---|---|---|
+| Same best move | 64.1% | 67.6% |
+| Same broad evaluation (White better / balanced / Black better) | 96.6% | 96.6% |
+| Native forced mates found, same side | 77.2% | 87.6% |
+| Throws ≥ 0.30, recall / precision | 82.5 / 95.4 | 86.5 / 95.6 |
+| Comebacks from ≤ 0.10, recall / precision | 90.0 / 96.4 | 93.3 / 96.6 |
+| Only winning moves (with probes), recall / precision | 80 / 100 | 80 / 100 |
+| Sound sacrifices, recall / precision | 62.5 / 100 | 62.5 / 100 |
+| Forced-mate runs, recall / precision | 56 / 64 | 56 / 58 |
+
+**Default: 25k nodes, 2 workers (Balanced).**
+- Precision is the same at 10k and 25k, so the browser rarely claims what native analysis doesn't. 25k finds
+  more: 88% of forced mates against 77%, and more throws and comebacks.
+- At 2 workers it still leaves most of the machine free. At about 75 positions a game, and roughly 110–138
+  positions a second measured on this machine at Balanced, 100 games take about a minute, 1,000 games 9–11
+  minutes and 5,000 games 45–57 minutes. A constrained device on one worker takes 2–3 times as long; its
+  exact speed is unmeasured.
+- Forced-mate runs agree least. A mate's length depends on how deep the search looks, so a different network
+  finds different runs. That is why browser results carry their own label and never pass for native ones.
+
 ## Reprocessing matrix
 
 | Change | What reruns | What doesn't |
