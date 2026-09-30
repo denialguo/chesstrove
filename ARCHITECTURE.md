@@ -791,6 +791,9 @@ counts underpromotions, the player's and their opponents', that were the single 
   searches, one per underpromotion (`engine/underpromotions.ts`): a 25k-node baseline for the depth target,
   then every legal move scored. It shares the verdict code with the record book.
 - Each verdict is saved to IndexedDB as it's found, and a partial check offers to do the rest.
+- Small checks run without a click: up to 25 underpromotions, which is under 30 s on one worker. They run
+  only on capable devices, 2.5 s after the page settles, once per browser, and stop if the visitor leaves.
+  This is the one exception to "the engine only runs when asked". Bigger histories keep the link.
 - It takes about 2 s per underpromotion across two workers: Hikaru's 216 take about 4 minutes.
 
 **Workers.** Balanced 2, Fast min(4, cores − 1), Max cores − 1. A constrained device gets one worker whatever

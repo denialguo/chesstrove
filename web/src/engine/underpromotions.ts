@@ -34,15 +34,19 @@ export async function underpromotions(platform: Platform, user: string) {
   return [...mine.map((e) => ({ e, mine: true })), ...against.map((e) => ({ e, mine: false }))];
 }
 
-export async function checkUnderpromotions(platform: Platform, user: string, onVerdict: (v: UpVerdict, done: number, total: number) => void) {
+export async function checkUnderpromotions(platform: Platform, user: string, onVerdict: (v: UpVerdict, done: number, total: number) => void,
+                                           opts: { workers?: number; signal?: AbortSignal } = {}) {
   const done = new Set((await savedVerdicts(platform, user)).map((v) => v.key));
   const todo = (await underpromotions(platform, user)).filter(({ e }) => !done.has(`${e.game_id}:${e.ply}`));
   const games = new Map<number, Promise<Awaited<ReturnType<typeof api.game>>>>();
-  const engines = await Promise.all(Array.from({ length: Math.min(workersFor("balanced"), Math.max(1, todo.length)) }, () => UciEngine.start()));
+  if (!todo.length || opts.signal?.aborted) return;
+  const engines = await Promise.all(Array.from({ length: Math.min(opts.workers ?? workersFor("balanced"), todo.length) }, () => UciEngine.start()));
+  const stop = () => engines.forEach((x) => x.terminate()); // leaving the page stops it; saved verdicts stay
+  opts.signal?.addEventListener("abort", stop);
   let next = 0, finished = 0;
   try {
     await Promise.all(engines.map(async (engine) => {
-      while (next < todo.length) {
+      while (next < todo.length && !opts.signal?.aborted) {
         const { e, mine } = todo[next++];
         if (!games.has(e.game_id)) games.set(e.game_id, api.game(String(e.game_id)));
         const g = await games.get(e.game_id)!;
@@ -61,7 +65,10 @@ export async function checkUnderpromotions(platform: Platform, user: string, onV
         onVerdict(v, ++finished, todo.length);
       }
     }));
+  } catch (e) {
+    if (!opts.signal?.aborted) throw e;
   } finally {
-    engines.forEach((x) => x.terminate());
+    opts.signal?.removeEventListener("abort", stop);
+    stop();
   }
 }

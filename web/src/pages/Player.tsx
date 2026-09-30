@@ -10,7 +10,9 @@ import { TopBar } from "../components/TopBar";
 import { api, type Motif, ApiError, PLATFORM_NAME, type EventRow, type Platform, type PlayerSummary } from "../lib/api";
 import { formatDate, formatMonth, moveLabel, n, plural, roughDuration } from "../lib/format";
 import { BEST_UNDERPROMOTION, FORM_NAME, MOTIFS, NAMED_MATES, formNote, type MateForm, type MotifInfo } from "../lib/motifs";
-import { supported } from "../engine/runner";
+import { device, supported } from "../engine/runner";
+
+const AUTO_CHECK_MAX = 25; // underpromotions checked without a click: under ~30 s on one core
 import { checkUnderpromotions, savedVerdicts, type UpVerdict } from "../engine/underpromotions";
 
 const POLL_MS = 2000;
@@ -168,7 +170,8 @@ export function Player() {
               <MotifRow key={m.type} motif={m} mine={counts.mine} against={counts.against} platform={platform} username={username} name={name} />,
               ...(m.type === "UNDERPROMOTION" && counts.mine + counts.against > 0
                 ? [<BestUnderpromotionRow key="BEST_UNDERPROMOTION" platform={platform} username={username} name={name}
-                     mineTotal={counts.mine} againstTotal={counts.against} server={summary.best_underpromotions ?? null} />]
+                     mineTotal={counts.mine} againstTotal={counts.against}
+                     server={new URLSearchParams(location.search).get("engine") === "browser" ? null : summary.best_underpromotions ?? null} />]
                 : []),
             ])}
         </ul>
@@ -275,19 +278,31 @@ function BestUnderpromotionRow({ platform, username, name, mineTotal, againstTot
   const locked = !server && judged === 0;
   const remaining = server ? 0 : total - judged;
 
-  const check = async () => {
+  const leaving = useRef(new AbortController());
+  useEffect(() => () => leaving.current.abort(), []);
+  const check = async (workers?: number) => {
     setFailed(null);
     setChecking({ done: 0, total: remaining });
     try {
       await checkUnderpromotions(platform, username, (v, done, all) => {
         setSaved((s) => [...(s ?? []), v]);
         setChecking({ done, total: all });
-      });
+      }, { workers, signal: leaving.current.signal });
     } catch (e) {
       setFailed(e instanceof Error ? e.message : String(e));
     }
-    setChecking(null);
+    if (!leaving.current.signal.aborted) setChecking(null);
   };
+
+  // A few underpromotions are checked without asking: seconds on one core, once per browser (verdicts are
+  // saved), only on capable devices, and only after the page has settled. Bigger histories keep the link.
+  const autoStarted = useRef(false);
+  useEffect(() => {
+    if (server || !canRun || saved === null || autoStarted.current || remaining <= 0 || remaining > AUTO_CHECK_MAX || device().constrained) return;
+    const t = setTimeout(() => { autoStarted.current = true; void check(1); }, 2500);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [server, canRun, saved, remaining]);
 
   const empty = !locked && mine + against === 0;
   const panelId = "motif-BEST_UNDERPROMOTION";
@@ -316,7 +331,7 @@ function BestUnderpromotionRow({ platform, username, name, mineTotal, againstTot
           {!empty && !locked && <ChevronDown className="ledger__chev" size={18} aria-hidden="true" />}
         </button>
         {canRun && !server && (locked || remaining > 0) && (
-          <button type="button" className="textlink ledger__unlock" disabled={!!checking} onClick={check}>
+          <button type="button" className="textlink ledger__unlock" disabled={!!checking} onClick={() => void check()}>
             {checking ? "Checking…" : locked ? "Check with Stockfish" : `Check the other ${remaining}`}
             {!checking && <ArrowRight size={14} aria-hidden="true" />}
           </button>
