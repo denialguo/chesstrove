@@ -5,16 +5,16 @@ import { Board } from "./Board";
 import { api, type Discovery, type DiscoveryType, type Platform } from "../lib/api";
 import { evalShort, evalWords, formatDate, moveLabel, plural } from "../lib/format";
 
-// The engine's record book: one card per discovery type, the top find with its board and evidence,
+// The engine records: one entry per discovery type, the top find with its board and evidence,
 // the next few as rows. Every sentence is built from the result's own evidence (archaeology.py).
 
 interface Shown {
-  value: string; // the headline, in the digit plate
+  value: string; // the entry's headline value
   sentence: string;
   fen: string;
   lastMove?: string | null;
   arrows?: { uci: string; brush: "brass" | "flag" }[];
-  bad?: boolean; // a moment that went wrong: the plate goes flag red
+  bad?: boolean; // a moment that went wrong: the value goes flag red
 }
 
 export const CARDS: { type: DiscoveryType; title: string; empty: string }[] = [
@@ -110,8 +110,8 @@ export function RecordBook({ platform, username, games, engine }: {
   return (
     <section className="records" aria-labelledby="records-title">
       <div className="section-head">
-        <h2 id="records-title">The record book</h2>
-        <p>{engine} read every position of all {plural(games, "game")}. These are the moments it singles out; each opens at the exact move.</p>
+        <h2 id="records-title">Engine records</h2>
+        <p>{engine} · {plural(games, "game")}. Open a position to review the move.</p>
       </div>
       <div className="records__grid">
         {CARDS.map((c) => <ServerCard key={c.type} {...c} platform={platform} username={username} />)}
@@ -137,7 +137,7 @@ export function Card({ type, title, empty, rows }: { type: DiscoveryType; title:
     <article className="record" aria-labelledby={`record-${type}`}>
       <header className="record__head">
         <h3 id={`record-${type}`}>{title}</h3>
-        {shown && <span className={`record__value ${shown.bad ? "record__value--bad" : ""}`}>{shown.value}</span>}
+        {shown && <span className={`record__value ${shown.bad ? "record__value--bad" : ""} ${["only_winning_move", "material_sacrifice", "underpromotion"].includes(type) ? "record__value--move" : ""}`}>{shown.value}</span>}
       </header>
       {!rows ? <p className="loading">Reading…</p> : !top ? <p className="muted">{empty}</p> : (
         <>
@@ -149,7 +149,7 @@ export function Card({ type, title, empty, rows }: { type: DiscoveryType; title:
             <div className="record__text">
               <p>{shown!.sentence}</p>
               <p className="record__meta">vs {top.opponent ?? (top.color === "w" ? top.game.black : top.game.white)} · {formatDate(top.game.played_at)}</p>
-              <Link to={gameLink(top)} className="textlink">Open the game at this move <ArrowRight size={14} aria-hidden="true" /></Link>
+              <Link to={gameLink(top)} className="textlink">Review position <ArrowRight size={14} aria-hidden="true" /></Link>
             </div>
           </div>
           {rest.length > 0 && (

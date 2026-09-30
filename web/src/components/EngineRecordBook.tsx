@@ -84,7 +84,7 @@ export function EngineRecordBook({ platform, username, positions }: { platform: 
 
   const head = (text: React.ReactNode) => (
     <div className="section-head">
-      <h2 id="records-title">The record book</h2>
+      <h2 id="records-title">Engine records</h2>
       {text}
     </div>
   );
@@ -93,8 +93,7 @@ export function EngineRecordBook({ platform, username, positions }: { platform: 
   if (phase === "unsupported") {
     return (
       <section className="records" aria-labelledby="records-title">
-        {head(<p>The record book needs Stockfish running in your browser, and this browser can’t run it (it needs WebAssembly and
-          Web Workers). Everything above works without it.</p>)}
+        {head(<p>This browser can’t run Stockfish. The patterns above are available without engine analysis.</p>)}
       </section>
     );
   }
@@ -102,14 +101,12 @@ export function EngineRecordBook({ platform, username, positions }: { platform: 
     const workers = workersFor("balanced", dev);
     return (
       <section className="records engine-offer" aria-labelledby="records-title">
-        {head(<p>Find your biggest comeback, your worst throw, the only winning moves you found, your sound sacrifices, your
-          longest forced mates and how your underpromotions stack up. Stockfish reads every position of your games to find them.</p>)}
+        {head(<p>Optional Stockfish analysis: comebacks, sacrifices, forced mates and the only moves that kept a win.</p>)}
         <div className="engine-offer__go">
-          <button type="button" className="plunger" onClick={start}>Analyze my games</button>
+          <button type="button" className="engine-btn" onClick={start}>Analyze with Stockfish</button>
           <p>
-            Runs on this device, not on ChessTrove’s server, and nothing is uploaded. It keeps {plural(workers, "processor core")} busy
-            for {duration(positions / (workers * PER_WORKER))} ({n(positions)} positions). Progress is saved: pause, close the tab
-            and pick it up later.
+            {n(positions)} positions · {duration(positions / (workers * PER_WORKER))} on {plural(workers, "processor core")}.
+            {" "}Runs on this device; results stay here. You can pause and resume later.
           </p>
         </div>
       </section>
@@ -135,7 +132,7 @@ export function EngineRecordBook({ platform, username, positions }: { platform: 
                   </>
                 )}
               </p>
-              {p.error && <p className="engine-status__error">The engine stopped: {p.error}. The collection above isn’t affected.</p>}
+              {p.error && <p className="engine-status__error">The engine stopped: {p.error}. The patterns above are still available.</p>}
               {!complete && (
                 <div className="engine-status__controls">
                   {p.running

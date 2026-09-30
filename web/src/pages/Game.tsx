@@ -133,15 +133,15 @@ export function Game() {
 
           {game.events.length > 0 && (
             <div className="found">
-              <h2>Found in this game</h2>
+              <h2>Patterns in this game</h2>
               <ul>
                 {game.events.map((e) => (
                   <li key={e.id}>
                     <button type="button" onClick={() => go(e.ply)}>
                       <span className="glyph">{motifInfo(e.type)?.glyph ?? "•"}</span>
                       <span>{motifInfo(e.type)?.name ?? e.type}
-                        {formNote(e.metadata) && <> <span className={`form-tag form-tag--${formNote(e.metadata)!.form}`}
-                          title={formNote(e.metadata)!.note || undefined}>{FORM_NAME[formNote(e.metadata)!.form]}</span></>}
+                        {formNote(e.metadata) && <> <span className="form-tag"
+                          title={formNote(e.metadata)!.note || undefined}>· {FORM_NAME[formNote(e.metadata)!.form]} form</span></>}
                       </span>
                       <span className="found__move">{moveLabel(e.ply, e.san, e.color)}</span>
                     </button>

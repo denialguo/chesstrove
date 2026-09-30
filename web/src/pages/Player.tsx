@@ -10,9 +10,7 @@ import { TopBar } from "../components/TopBar";
 import { api, type Motif, ApiError, PLATFORM_NAME, type EventRow, type Platform, type PlayerSummary } from "../lib/api";
 import { formatDate, formatMonth, moveLabel, n, plural, roughDuration } from "../lib/format";
 import { BEST_UNDERPROMOTION, COUNTED, FORM_NAME, MOTIFS, NAMED_MATES, formNote, type MateForm, type MotifInfo } from "../lib/motifs";
-import { device, supported } from "../engine/runner";
-
-const AUTO_CHECK_MAX = 25; // underpromotions checked without a click: under ~30 s on one core
+import { supported } from "../engine/runner";
 import { checkUnderpromotions, savedVerdicts, type UpVerdict } from "../engine/underpromotions";
 
 const POLL_MS = 2000;
@@ -124,16 +122,15 @@ export function Player() {
               unit={expected ? `games on ${PLATFORM_NAME[platform]}` : "games in so far"}
               who="Importing" examples={null} />
           ) : (
-            <Tally value={rare.mine} unit={rare.mine === 1 ? "rare moment" : "rare moments"}
+            <Tally value={rare.mine} unit={rare.mine === 1 ? "Rare moment" : "Rare moments"}
               who={`by ${name}`} examples={examples(rare.types, "mine")} />
           )}
-          <Tally value={rare.against} unit={rare.against === 1 ? "rare moment" : "rare moments"}
+          <Tally value={rare.against} unit={rare.against === 1 ? "Rare moment" : "Rare moments"}
             who="by their opponents" examples={examples(rare.types, "against")} />
         </div>
         <div className="case__plate" aria-live="polite">
           <p className="case__explain">
-            Unusual moves found directly from the games, no engine: rare and named mates, underpromotions, three-queen
-            boards and more. A move with several labels counts once.
+            Unusual moves found without an engine. Each move counts once.
           </p>
           <p>
             {running
@@ -144,9 +141,9 @@ export function Player() {
       </div>
 
       <section className="ledger" aria-labelledby="ledger-title">
-        <div className="section-head">
-          <h2 id="ledger-title">The collection</h2>
-          <p>Counted across all {plural(summary.games, "game")}. Open one to see the positions.</p>
+        <div className="section-head ledger__heading">
+          <h2 id="ledger-title">Found in these games</h2>
+          <p>Open a pattern to see the moves.</p>
         </div>
         <div className="ledger__cols" aria-hidden="true">
           <span>By {name}</span><span /><span>Against</span>
@@ -169,8 +166,8 @@ export function Player() {
       {namedFound.length > 0 && (
         <section className="ledger ledger--named" aria-labelledby="named-title">
           <div className="section-head">
-            <h3 id="named-title">Named mates</h3>
-            <p>By their geometry, with how closely each matches the classic diagram. {plural(NAMED_MATES.length - namedFound.length, "other")} haven’t turned up yet.</p>
+            <h2 id="named-title">Mating patterns</h2>
+            <p>By {name} on the left, opponents on the right. Open a mate for its positions and forms.</p>
           </div>
           <ul className="ledger__rows">
             {namedFound.map(({ m, counts }) => (
@@ -184,8 +181,8 @@ export function Player() {
         <RecordBook platform={platform} username={username} games={summary.games}
           engine={`${summary.engine.config.engine_name} (${n(summary.engine.config.limit_value)} ${summary.engine.config.limit_kind} a position)`} />
       ) : running ? (
-        <section className="records"><div className="section-head"><h2>The record book</h2>
-          <p>Once the import finishes, Stockfish can read these games for the record book. The collection above doesn’t need it.</p></div></section>
+        <section className="records"><div className="section-head"><h2>Engine records</h2>
+          <p>Optional Stockfish analysis is available once these games finish importing.</p></div></section>
       ) : summary.games > 0 ? (
         <EngineRecordBook platform={platform} username={username} positions={summary.positions} />
       ) : null}
@@ -248,7 +245,6 @@ function MotifRow({ motif, mine, against, forms, platform, username, name }: {
           <span className="glyph">{motif.glyph}</span>
           <span className="ledger__text">
             <span className="ledger__name">{motif.name}</span>
-            {breakdown && <span className="ledger__forms">{breakdown}</span>}
             <span className="ledger__def">{empty ? "Not in these games yet." : motif.definition}</span>
           </span>
         </span>
@@ -257,6 +253,7 @@ function MotifRow({ motif, mine, against, forms, platform, username, name }: {
       </button>
       {open && (
         <div id={panelId} className="ledger__panel">
+          {breakdown && <p className="ledger__forms">By {name}: {breakdown}.</p>}
           <div className="seg" role="tablist" aria-label="Whose moves">
             <button role="tab" aria-selected={side === "mine"} disabled={mine === 0} onClick={() => setSide("mine")}>By {name} ({n(mine)})</button>
             <button role="tab" aria-selected={side === "against"} disabled={against === 0} onClick={() => setSide("against")}>Against ({n(against)})</button>
@@ -310,16 +307,6 @@ function BestUnderpromotionRow({ platform, username, name, mineTotal, againstTot
     }
     if (!leaving.current.signal.aborted) setChecking(null);
   };
-
-  // A few underpromotions are checked without asking: seconds on one core, once per browser (verdicts are
-  // saved), only on capable devices, and only after the page has settled. Bigger histories keep the link.
-  const autoStarted = useRef(false);
-  useEffect(() => {
-    if (server || !canRun || saved === null || autoStarted.current || remaining <= 0 || remaining > AUTO_CHECK_MAX || device().constrained) return;
-    const t = setTimeout(() => { autoStarted.current = true; void check(1); }, 2500);
-    return () => clearTimeout(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [server, canRun, saved, remaining]);
 
   const empty = !locked && mine + against === 0;
   const panelId = "motif-BEST_UNDERPROMOTION";
@@ -393,7 +380,7 @@ function Specimens({ platform, username, type, side, only }: {
               <span className="specimen__meta">vs {opponent} · {formatDate(r.played_at)}</span>
               {form && (
                 <span className="specimen__form">
-                  <span className={`form-tag form-tag--${form.form}`}>{FORM_NAME[form.form]}</span> {form.note}
+                  <span className="form-tag">{FORM_NAME[form.form]} form.</span> {form.note}
                 </span>
               )}
             </Link>

@@ -26,10 +26,10 @@ typography:
     fontWeight: 800
     lineHeight: 0.9
   headline:
-    fontFamily: "Big Shoulders Display, Arial Narrow, sans-serif"
-    fontSize: "clamp(2rem, 3.4vw, 2.8rem)"
-    fontWeight: 800
-    lineHeight: 0.95
+    fontFamily: "Hanken Grotesk Variable, system-ui, sans-serif"
+    fontSize: "1.4rem"
+    fontWeight: 700
+    lineHeight: 1.2
   count:
     fontFamily: "Big Shoulders Display, Arial Narrow, sans-serif"
     fontSize: "clamp(3rem, 22cqi, 7.5rem)"
@@ -143,7 +143,7 @@ components:
 
 Every player page is a two-faced tournament clock: the player's side and their opponents' side of the same history. The page is the clock's case, a flat walnut field; the readouts are white enamel dials with sixty minute ticks and dial-black numerals; brass appears where a hand would press, like a clock's plunger buttons. Counts never float as free numbers; they sit in fixed-width digit banks, leading zeros kept and dimmed, so a page of counts reads like a bank of meters.
 
-Hierarchy comes from scale contrast alone: huge condensed uppercase numerals and headings against small, plain grotesk labels. There is no second accent, no gradient chrome, no card grid. Density is calm on the landing (one clock, one line of copy) and ledger-like on the player page (ruled rows with counts in the margins, like a scorebook). The reference this system turns away from is the dark chess-app dashboard: a search bar over a board, stat tiles, green accent.
+Hierarchy comes from condensed page titles and clock numerals against plain grotesk section headings, labels and explanations. There is no second accent, no gradient chrome, no card grid. Density is calm on the landing (one clock, a short invitation and a real game caption) and ledger-like on the player page (ruled rows with counts in the margins, like a scorebook). The reference this system turns away from is the dark chess-app dashboard: a search bar over a board, stat tiles, green accent.
 
 Motion is mechanical and sparse: a second hand sweeps (6s per turn) only while something is running, the plunger sinks into the case when pressed, boards lift two pixels on hover. All of it stops under reduced motion.
 
@@ -151,7 +151,7 @@ Motion is mechanical and sparse: a second hand sweeps (6s per turn) only while s
 - Flat walnut case, white enamel dials with minute ticks, no wood or brass textures.
 - Brass on controls and the player's own finds; flag red on moments that went wrong.
 - Counts in fixed tabular digit banks with dimmed leading zeros.
-- Big Shoulders Display for headings and counts, Hanken Grotesk for labels and text, Martian Mono for notation.
+- Big Shoulders Display for page titles and counts, Hanken Grotesk for section headings, labels and text, Martian Mono for notation.
 - A sweeping hand means "running"; a still dial means "settled".
 
 ## Colors
@@ -198,7 +198,7 @@ A warm, dark wood field with cream enamel readouts and two narrowly-rationed sig
 
 ### Hierarchy
 - **Display** (800, clamp(2.6rem, 6vw, 4.4rem), 0.9, uppercase): the player's name and the game title; the page's single loudest line.
-- **Headline** (800, clamp(2rem, 3.4vw, 2.8rem), 0.95, uppercase): section heads ("The collection", "Stockfish"). The landing's one line of copy uses the same voice smaller (clamp(1.8rem, 2.6vw, 2.5rem)) so the clock stays the hero.
+- **Headline** (Hanken Grotesk 700, 1.4rem, 1.2, sentence case): section heads ("Found in these games", "Mating patterns"). Secondary engine and game sections use 1.2rem and 1.1rem. The landing title keeps Big Shoulders Display (clamp(1.8rem, 2.6vw, 2.5rem)) so the clock stays the hero.
 - **Count** (800, clamp(3rem, 22cqi, 7.5rem), 0.9, tabular): digit banks on dial faces, scaled to the dial via container units; ledger counts at 2.4rem, rating plates at 1.35rem.
 - **Title** (700, 1.1rem): motif names in the ledger, engine list heads (1.2rem), player names on plates.
 - **Body** (400, 1.0625rem, 1.55; 1rem on phones): explanations, capped at 68ch, definitions at 0.92rem.
@@ -206,15 +206,15 @@ A warm, dark wood field with cream enamel readouts and two narrowly-rationed sig
 - **Notation** (600, 0.85rem): moves (29…Nf2#), motif marks (N#, =Q#, ??), the whole move list.
 
 ### Named Rules
-**The Three Voices Rule.** Big Shoulders Display is for headings and counts. Hanken Grotesk is for labels and text. Martian Mono is only for notation and glyphs; it never sets a sentence or a label.
+**The Three Voices Rule.** Big Shoulders Display is for page titles and counts. Hanken Grotesk is for section headings, buttons, labels and text. Martian Mono is only for notation and glyphs; it never sets a sentence or a classification label.
 
-**The Scale-Only Rule.** Hierarchy is carried by size contrast between the display face and small grotesk, not by colour chips, boxes or rules around headings.
+**The Type Hierarchy Rule.** Page titles and readouts carry the display face; navigation and explanations use the quieter grotesk. Do not manufacture emphasis with colour chips or boxes around headings.
 
 ## Layout
 
-A single centred column, `min(100% - 2rem, 76rem)`, shared by the top bar, main and footer. Spacing runs on an expanding 8-step scale (space-1 to space-8, 0.25rem to 5.5rem); sections are separated by space-8 and rows by space-4. Text is capped at a 68ch measure.
+A single centred column, `min(100% - 2rem, 76rem)`, shared by the top bar, main and footer. Spacing runs on an expanding 8-step scale (space-1 to space-8, 0.25rem to 5.5rem). Related content sits close: the player ledger follows the clock by 2.25rem; the optional engine layer gets a 3.5rem break and a rule. Text is capped at a 68ch measure.
 
-The clock case is the recurring composition: a rounded walnut-deep body holding two equal dials side by side, with plungers riding its top edge. On the landing it is centred (max 46rem); on the player page it is left-aligned (max 38rem) under the player's name. Below 640px the landing clock stacks its dials and drops the decorative second plunger; the player clock keeps both dials side by side, smaller.
+The clock case is the recurring composition: a rounded walnut-deep body with plungers riding its top edge. The landing holds two enamel dials, centred (max 46rem). Below 640px they stack, with a smaller sample-board dial and no decorative second plunger. The player case is left-aligned (max 60rem), with two small readouts beside their captions and examples; these groups stack on phones. A short counting explanation and W/D/L share the lower plate where space permits.
 
 The player ledger is a three-column scorebook: the player's count left (5.5rem), motif in the middle, the opponents' count right; rows are separated by walnut rules. The game viewer is board (up to 36rem) plus a side column (move list, found list); it collapses to one column below 860px. The top-bar lookup reflows into two rows below 860px.
 
@@ -238,7 +238,7 @@ Circles and slabs. Dials are perfect circles (SVG, 200-unit viewBox: black bezel
 ## Components
 
 ### Plunger (primary action)
-The brass button on top of the case. Big Shoulders Display 800, uppercase, 0.04em tracking, dial-black on brass; hover to brass-hi; pressing pushes it 5px down into the case and shortens its shadow. A plunger in the "down" position is a short brass stub. On the player page both plungers are decorative and swap up/down to show which side is running (importing).
+The brass button on top of the case. Hanken Grotesk 700, 0.95rem, sentence case, dial-black on brass; hover to brass-hi; pressing pushes it 5px down into the case and shortens its shadow. A plunger in the "down" position is a short brass stub. On the player page both plungers are decorative and swap up/down to show which side is running (importing).
 
 ### Enamel Dial
 The signature readout. A square container holding the drawn face, with content inset 16% (22% when holding a board). Content is either a digit bank over a small grey caption, the username form, or a sample board ringed in dial black. A brass arc on the minute track shows progress; a dial-black second hand sweeps only while running.
@@ -264,6 +264,11 @@ A full-width ruled row: player's count in brass-hi on the left, motif mark in no
 
 ### Specimen
 A board thumbnail over its move in notation and a faded "vs opponent · date" line. Grid of auto-fill 11.5rem columns (two on phones). Hover lifts the board and rings it in brass.
+
+Named-mate forms are secondary notes beneath the specimen: "Classic form", "Core form" or "Variant form", followed by any explanation. No classification pills or uppercase mono labels. The collapsed row names the mate; form totals appear only when it is opened.
+
+### Engine Records
+An optional layer after the deterministic patterns. Use ruled entries with small boards and evidence, two columns on desktop and one on phones; no rounded card backgrounds or enamel value chips. The opt-in action is a restrained outlined button. Visiting a fresh history does not start Stockfish, including underpromotion checks; the user must ask for analysis. Existing opted-in runs retain their resume behavior.
 
 ### Navigation
 The top bar: wordmark left (a tiny enamel dial with a brass plunger, "CHESSTROVE" in Big Shoulders 800), player lookup right. On the landing the lookup is omitted because the clock is the form.
