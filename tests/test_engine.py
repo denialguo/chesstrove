@@ -314,12 +314,20 @@ def test_a_better_move_outside_the_queen_comparison_means_not_best(conn, monkeyp
     assert a["all_moves"]["best_moves"] == ["e1d2"]
 
 
-def test_best_needs_a_real_margin(conn, monkeypatch):
-    # 12 centipawns at +5.5 is noise, and two forced mates are both a win whatever their length: ties.
+def test_centipawn_noise_ties(conn, monkeypatch):
+    # 12 centipawns at +5.5 is noise: a tie, not a better move
     a = underpromotion_analysis(conn, monkeypatch, {"a7a8n": 563, "a7a8q": 551})["w"]
     assert (a["is_best_move"], a["tied_for_best_move"], a["unique_best_move"], a["vs_queen"]["verdict"]) == (True, True, False, "equal")
-    m = underpromotion_analysis(conn, monkeypatch, {"a7a8n": ("mate", 4), "a7a8q": ("mate", 5)})["w"]
-    assert (m["unique_best_move"], m["tied_for_best_move"], m["better_than_queen"]) == (False, True, False)
+
+
+@pytest.mark.parametrize("knight,queen,unique,verdict", [
+    (("mate", 4), ("mate", 5), True, "better"),  # a shorter mate really is better
+    (("mate", 5), ("mate", 5), False, "equal"),  # the same mate ties
+    (("mate", 9), 900, True, "better"),  # a forced mate beats +9
+])
+def test_mates_compare_exactly(conn, monkeypatch, knight, queen, unique, verdict):
+    m = underpromotion_analysis(conn, monkeypatch, {"a7a8n": knight, "a7a8q": queen})["w"]
+    assert (m["unique_best_move"], m["vs_queen"]["verdict"]) == (unique, verdict)
 
 
 def test_tied_for_best(conn, monkeypatch):
@@ -377,10 +385,9 @@ def test_stockfish_knight_fork_underpromotion_beats_queening(conn):
 
 
 @needs_stockfish
-def test_stockfish_saavedra_rook_underpromotion_is_best_and_beats_queening(conn):
+def test_stockfish_saavedra_rook_underpromotion_is_the_unique_best_move(conn):
     # A cheap unrestricted search prefers Kd3 here; scoring every legal move finds g8=R mates in 2, where
-    # g8=Q stalemates. Without Black's rook, quiet king moves still force mate too, so the rook is tied for
-    # best rather than the only winning move: two forced mates are both a win.
+    # g8=Q stalemates (quiet king moves mate too, but more slowly).
     from chesstrove import insights
 
     saavedra = '[White "a"]\n[Black "b"]\n[Result "*"]\n[SetUp "1"]\n[FEN "8/6P1/8/8/8/8/2K5/k7 w - - 0 1"]\n\n1. g8=R *\n'
@@ -388,7 +395,7 @@ def test_stockfish_saavedra_rook_underpromotion_is_best_and_beats_queening(conn)
     engine.run(conn, EngineSettings(limit_value=20_000))
     [e] = insights.annotate(conn, db.list_events(conn, type="UNDERPROMOTION"))
     a = e["engine_analysis"]
-    assert (a["is_best_move"], a["better_than_queen"]) == (True, True)
+    assert (a["is_best_move"], a["unique_best_move"], a["better_than_queen"]) == (True, True, True)
     assert a["all_moves"]["evaluation"] == {"mate": 2} and a["vs_queen"]["queen_promotion_evaluation"] == {"cp": 0}
 
 

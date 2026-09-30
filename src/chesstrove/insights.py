@@ -23,17 +23,21 @@ def _pov(cp: int | None, mate: int | None, flip: bool) -> chess.engine.Score:
     return chess.engine.Cp(-cp if flip else cp)
 
 
-# "Best" means best by a margin a player would recognise: moves within this much expected score (lichess
-# scale) of each other tie. Without it, a knight promotion at +5.63 "beat" queening at +5.51 (noise), and a
-# mate in 4 beat a mate in 5 (a node-limited search's mate distance is only an upper bound anyway).
+# Centipawn scores within this much expected score (lichess scale) of each other tie: a knight promotion
+# at +5.63 doesn't "beat" queening at +5.51. Mates are exact: mate in 4 beats mate in 5, the same mate ties.
 BEST_MARGIN = 0.10
 
 
-def _expected(score: chess.engine.Score) -> float:
-    """The mover's expected score (db._expected, lichess scale): a forced mate is 1 or 0 whatever its length."""
-    if score.is_mate():
-        return 1.0 if score.mate() >= 0 else 0.0  # MateGiven is mate 0: the mover delivered it
-    return 1 / (1 + math.exp(-db.LICHESS_K * score.score()))
+def _expected(cp: int) -> float:
+    return 1 / (1 + math.exp(-db.LICHESS_K * cp))
+
+
+def _ties(a: chess.engine.Score, b: chess.engine.Score) -> bool:
+    """Equal for 'best move' purposes: the same mate (or both mated in the same), or centipawn scores within
+    BEST_MARGIN. A mate never ties with a centipawn score."""
+    if a.is_mate() or b.is_mate():
+        return a == b
+    return abs(_expected(a.score()) - _expected(b.score())) < BEST_MARGIN
 
 
 def _show(score: chess.engine.Score | None) -> dict | None:
@@ -156,10 +160,9 @@ def _verdicts(played: str, flip: bool, board: chess.Board, vs_queen: list | None
         queen = played[:4] + "q"
         if played in scores and queen in scores:
             transposes = keys[played] == keys[queen]
-            gap = _expected(scores[played]) - _expected(scores[queen])
-            # identical positions after the reply are equal, whatever noise the two scores carry; otherwise
-            # a difference only counts past BEST_MARGIN
-            verdict = "equal" if transposes or abs(gap) < BEST_MARGIN else "better" if gap > 0 else "worse"
+            # identical positions after the reply are equal, whatever noise the two scores carry
+            verdict = ("equal" if transposes or _ties(scores[played], scores[queen])
+                       else "better" if scores[played] > scores[queen] else "worse")
             out["vs_queen"] = {"evaluation": _show(scores[played]), "queen_promotion_evaluation": _show(scores[queen]),
                                "transposes_with_queen": transposes, "verdict": verdict, "budget": vs_queen_budget}
             out["better_than_queen"] = verdict == "better"
@@ -170,8 +173,8 @@ def _verdicts(played: str, flip: bool, board: chess.Board, vs_queen: list | None
 
 def _best_move_verdict(played: str, flip: bool, board: chess.Board, results: list, legal: list, budget: dict) -> dict:
     """is_best_move / tied_for_best_move / unique_best_move, only when every legal move got a score.
-    Moves that transpose into the same position are one choice, so they tie rather than rank, and moves
-    within BEST_MARGIN expected score of the top one tie with it (two forced mates always do).
+    Moves that transpose into the same position are one choice, so they tie rather than rank, and so do
+    moves that _tie with the top one (the same mate, or centipawns within BEST_MARGIN).
     played_move_rank is the engine's raw order."""
     raw = {r["uci"]: _pov(r["score_cp"], r["mate"], flip) for r in results}
     complete = set(raw) == set(legal) and played in raw
@@ -182,8 +185,7 @@ def _best_move_verdict(played: str, flip: bool, board: chess.Board, results: lis
     keys = _transposition_keys(board, results)
     scores = _class_scores(raw, keys)
     top = max(scores.values())
-    exp = {u: _expected(sc) for u, sc in scores.items()}
-    best = sorted(u for u in scores if exp[u] >= max(exp.values()) - BEST_MARGIN)
+    best = sorted(u for u, sc in scores.items() if sc == top or _ties(sc, top))
     is_best = played in best
     verdict["all_moves"].update(evaluation=_show(raw[played]), best_moves=best, best_evaluation=_show(top),
                                 transposes_with=sorted(u for u in raw if u != played and keys[u] == keys[played]))

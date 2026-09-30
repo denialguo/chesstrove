@@ -524,15 +524,14 @@ with its own search (`engine_move_probes`, one row per kind), and never lets one
 - **A. Was the underpromotion the best move in the position?** (`kind = 'all_moves'`) One search from the
   position before the move with `searchmoves` = **every legal move** and MultiPV = their number, so every
   root move is scored in the same search iteration. Budget: see *Probe budget* below.
-  - "Best" is judged on the mover's expected score (lichess scale) with a margin, `insights.BEST_MARGIN` = 0.10:
-    moves within 0.10 of each other tie. So two forced mates always tie, whatever their length (a node-limited
-    mate distance is only an upper bound anyway), and so do +5.63 and +5.51. Before the margin, both
-    produced silly "only best move" underpromotions on the real history: a knight's mate in 4 beating a
-    queen's mate in 5, and bxc8=B at +5.63 beating =R, =N and =Q within 12 centipawns.
-  - `is_best_move`: the played move is within the margin of the best legal move.
+  - "Best" ignores centipawn noise but not mates. Two centipawn scores tie when they're within
+    `insights.BEST_MARGIN` = 0.10 expected score (lichess scale). Before this, bxc8=B at +5.63 "beat"
+    =R, =N and =Q within 12 centipawns on the real history. Mates compare exactly: mate in 4 beats mate in 5,
+    the same mate ties, and any forced mate beats any centipawn score.
+  - `is_best_move`: the played move is the best legal move or ties with it.
   - `tied_for_best_move`: best, and some other move is too. For example, if `=Q#` and `=R#` both mate, the
     rook underpromotion is tied, not unique.
-  - `unique_best_move`: best, and every other legal move is at least the margin worse.
+  - `unique_best_move`: best, and no other legal move ties with it.
   - `played_move_rank`: 1 + the number of moves scoring strictly better (the engine's raw order).
   - The vs-queen comparison (B) uses the same margin: `vs_queen.verdict` is `better`, `equal` or `worse`.
   - If the search didn't return a score for every legal move, all four are `null`. Never guess: an unscored
