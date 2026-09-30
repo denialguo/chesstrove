@@ -74,8 +74,28 @@ export class ApiError extends Error {
   constructor(public status: number, message: string) { super(message); }
 }
 
+/** fetch that waits out a sleeping API server. Render's free instance takes up to a minute to wake, and meanwhile
+ *  can drop the connection or answer 502/503/504: those are retried with backoff for about two minutes, while the page
+ *  says it's waking the server. Anything else (a 404, 422, 429, or a 500 from a real bug) comes straight back. */
+export async function wakeFetch(url: string, init?: RequestInit, get: typeof fetch = fetch,
+                                sleep = (ms: number) => new Promise((r) => setTimeout(r, ms)), budgetMs = 120_000): Promise<Response> {
+  let wait = 1000, spent = 0;
+  for (;;) {
+    try {
+      const r = await get(url, init);
+      if (![502, 503, 504].includes(r.status)) return r;
+      if (spent >= budgetMs) return r;
+    } catch (e) {
+      if (spent >= budgetMs) throw e;
+    }
+    await sleep(wait);
+    spent += wait;
+    wait = Math.min(wait * 2, 15_000);
+  }
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(apiUrl(path), init);
+  const res = await wakeFetch(apiUrl(path), init);
   if (!res.ok) throw new ApiError(res.status, `${res.status} ${res.statusText}`);
   return res.json() as Promise<T>;
 }

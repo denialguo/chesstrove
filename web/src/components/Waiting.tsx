@@ -11,7 +11,7 @@ export function Waiting({ children }: { children: ReactNode }) {
   return (
     <div className="loading" aria-live="polite">
       <p>{children}</p>
-      {slow && <p className="loading__slow">Waking ChessTrove’s server. This can take up to a minute.</p>}
+      {slow && <p className="loading__slow">Waking ChessTrove’s server. This can take up to a minute; it keeps trying.</p>}
     </div>
   );
 }
