@@ -24,12 +24,17 @@ class Event:
 class Detector(Protocol):
     id: str  # stable; stored on every event
     version: int  # bump when the definition changes; `chesstrove reanalyze` then redoes stale games
+    # the first condition detect() checks, as a key of indexing.GATES: the indexer skips the detector on plies where
+    # it can't hold ("any" = every ply). Must be implied by detect()'s own logic, never a new rule.
+    requires: str
+    tier: str  # "fast": the first pass; "deep": a slower, optional second pass (indexing.FAST / DEEP)
 
     def detect(self, ctx: MoveContext) -> list[Event]: ...
 
 
 def event(ctx: MoveContext, type: str, **metadata: Any) -> Event:
-    return Event(type, ctx.ply, ctx.facts.color, ctx.facts.fen_before, metadata)
+    fen = ctx.facts.fen_before if ctx.facts.fen_before is not None else ctx.board_before.fen()
+    return Event(type, ctx.ply, ctx.facts.color, fen, metadata)
 
 
 def piece_name(letter: str) -> str:

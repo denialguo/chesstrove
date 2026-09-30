@@ -511,6 +511,8 @@ def box(m: Mate) -> Match | None:
 
 
 class NamedMate:
+    requires = "checkmate"  # anatomy() is None otherwise
+    tier = "fast"
     version = 3  # 2: family/form split, events carry form and traits. 3: Hook takes the pawn-backed chain from Arabian; every ladder is textbook; swallow's tail textbook needs only the two tail blockers
 
     def __init__(self, id: str, test: Callable[[Mate], Match | None]):

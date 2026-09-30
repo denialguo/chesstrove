@@ -51,8 +51,8 @@ class MoveFacts:
     is_castling: bool
     is_en_passant: bool
     promotion: str | None  # uppercase piece letter, or None
-    fen_before: str
-    fen_after: str
+    fen_before: str | None  # None when replayed with fens=False (indexing: see MoveContext.board_before.fen())
+    fen_after: str | None
     queens_before: int
     queens_after: int
     material_white: int  # after the move, P=1 N=3 B=3 R=5 Q=9
@@ -75,3 +75,4 @@ class MoveContext:
     board_after: chess.Board
     san: str
     facts: MoveFacts
+    legal_before: list[chess.Move] | None = None  # the mover's legal moves, already generated to count them

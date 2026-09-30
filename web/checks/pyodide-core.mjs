@@ -1,6 +1,6 @@
 // Run ChessTrove's browser core the way the indexing worker does (Pyodide + the zipped python-chess + the files
 // worker.ts bundles), but in Node, offline. Reads a Chess.com archive (JSON) on stdin, writes
-// indexing.index_chesscom_archive's output to stdout. tests/test_browser_import.py compares it with native Python.
+// indexing.index_chesscom_archive's output to stdout (or, with `deep`, reads deep_scan's input and writes its output). tests/test_browser_import.py compares it with native Python.
 import { readFileSync, readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -30,4 +30,5 @@ py.runPython("import chesstrove.indexing as ix");
 const chunks = [];
 for await (const c of process.stdin) chunks.push(c); // readFileSync(0) fails on a non-blocking pipe
 const input = Buffer.concat(chunks).toString("utf8");
-process.stdout.write(py.globals.get("ix").index_chesscom_archive(input));
+const ix = py.globals.get("ix"); // `deep` argument: the deep pass (indexing.deep_scan) instead of the first
+process.stdout.write(process.argv[2] === "deep" ? ix.deep_scan(input) : ix.index_chesscom_archive(input));

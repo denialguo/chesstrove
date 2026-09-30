@@ -12,6 +12,8 @@ class DoubleDisambiguatedSan:
     PGN's text, because some sites over-disambiguate. Pawns never qualify."""
 
     id = "DOUBLE_DISAMBIGUATED_SAN"
+    requires = "piece_move"
+    tier = "fast"
     version = 1
 
     def detect(self, ctx: MoveContext) -> list[Event]:

@@ -121,6 +121,8 @@ CREATE TABLE IF NOT EXISTS analysis_runs (
     started_at         timestamptz NOT NULL DEFAULT now(),
     finished_at        timestamptz
 );
+-- a browser's deep-pass session (browser_import.start_deep): {client, platform, username, token_sha256, last_seen}
+ALTER TABLE analysis_runs ADD COLUMN IF NOT EXISTS session jsonb;
 
 CREATE TABLE IF NOT EXISTS events (
     id                bigserial PRIMARY KEY,

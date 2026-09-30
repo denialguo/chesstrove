@@ -1,12 +1,20 @@
 // Messages between the page and the indexing worker (worker.ts).
 
+/** How hard the worker runs: the fraction of the time it computes. After each slice of Python work it rests
+ *  for work * (1 - duty) / duty, so the core it uses is busy that share of the time, not pinned. */
+export const DUTY = { fast: 1, balanced: 0.6, deep: 0.3, gentle: 0.35 } as const;
+
 export interface Start {
   type: "start"; username: string; apiBase: string; importId: number; token: string;
-  monthsDone: string[]; versions: Record<string, number>; batchSize: number;
+  monthsDone: string[]; versions: Record<string, number>; batchSize: number; slice: number; duty: number;
+}
+/** The deep pass (DEEP detectors) over games the server already has. */
+export interface StartDeep {
+  type: "deep"; apiBase: string; runId: number; token: string; versions: Record<string, number>; slice: number; duty: number;
 }
 export interface Progress {
   type: "progress";
-  phase: "loading" | "listing" | "indexing" | "done";
+  phase: "loading" | "listing" | "indexing" | "deep" | "done";
   archivesTotal: number; archivesDone: number; month: string | null;
   analyzed: number; uploaded: number; events: number; uploading: boolean;
 }
@@ -14,7 +22,10 @@ export type FromWorker =
   | Progress
   | { type: "month"; month: string }            // a month the server has acknowledged in full
   | { type: "error"; message: string; retry: boolean }
-  | { type: "timing"; name: string; ms: number }; // for benchmarks: pyodide, fetch, analyze, upload
+  | { type: "timing"; name: string; ms: number }; // for benchmarks: pyodide, fetch, analyze, rest, upload
+
+/** How long to rest after `workMs` of computing, to keep to `duty`. */
+export const restFor = (workMs: number, duty: number) => (duty >= 1 ? 0 : (workMs * (1 - duty)) / duty);
 
 /** Chess.com archive months, newest first; months already stored are skipped, except the current one, which is
  *  still being played. */

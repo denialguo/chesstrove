@@ -4,8 +4,7 @@ the old one-row-per-ply table with a FEN on every row."""
 import pytest
 
 from chesstrove import compact, db
-from chesstrove.analysis import analyze
-from chesstrove.detectors import DETECTORS
+from chesstrove.reconstruction import replay
 from chesstrove.importers.pgn import read_pgn
 from chesstrove.ingest import import_pgn
 
@@ -47,7 +46,7 @@ def expected_rows(conn) -> list[dict]:
     out = []
     for g in conn.execute("SELECT id, pgn FROM games ORDER BY id").fetchall():
         [game] = read_pgn(g["pgn"])
-        facts, _ = analyze(game, DETECTORS)
+        facts = [ctx.facts for ctx in replay(game)]  # with FENs: what the old table stored
         out += [{"game_id": g["id"], **{c: getattr(f, c) for c in COLUMNS[1:]}, "fen_after": f.fen_after} for f in facts]
     return out
 

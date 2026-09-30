@@ -1,4 +1,4 @@
-var x="",q=`"""Detector registry. Adding a detector = write the class, add one line here, add tests."""
+var E="",S=`"""Detector registry. Adding a detector = write the class, add one line here, add tests."""
 
 from collections.abc import Sequence
 
@@ -37,7 +37,7 @@ def select(ids: Sequence[str] | None) -> tuple[Detector, ...]:
 
 
 __all__ = ["DETECTORS", "Detector", "Event", "select"]
-`,N=`"""The detector contract. A detector sees one MoveContext at a time and returns zero or more Events.
+`,C=`"""The detector contract. A detector sees one MoveContext at a time and returns zero or more Events.
 
 Detectors are stateless and deterministic. "Once per game" conditions are written as transitions
 (before < threshold <= after) so no per-game state is needed.
@@ -63,12 +63,17 @@ class Event:
 class Detector(Protocol):
     id: str  # stable; stored on every event
     version: int  # bump when the definition changes; \`chesstrove reanalyze\` then redoes stale games
+    # the first condition detect() checks, as a key of indexing.GATES: the indexer skips the detector on plies where
+    # it can't hold ("any" = every ply). Must be implied by detect()'s own logic, never a new rule.
+    requires: str
+    tier: str  # "fast": the first pass; "deep": a slower, optional second pass (indexing.FAST / DEEP)
 
     def detect(self, ctx: MoveContext) -> list[Event]: ...
 
 
 def event(ctx: MoveContext, type: str, **metadata: Any) -> Event:
-    return Event(type, ctx.ply, ctx.facts.color, ctx.facts.fen_before, metadata)
+    fen = ctx.facts.fen_before if ctx.facts.fen_before is not None else ctx.board_before.fen()
+    return Event(type, ctx.ply, ctx.facts.color, fen, metadata)
 
 
 def piece_name(letter: str) -> str:
@@ -77,7 +82,7 @@ def piece_name(letter: str) -> str:
 
 def checker_squares(board: chess.Board) -> list[str]:
     return [chess.square_name(s) for s in board.checkers()]
-`,E=`from chesstrove.detectors.base import Event, checker_squares, event
+`,M=`from chesstrove.detectors.base import Event, checker_squares, event
 from chesstrove.models import MoveContext
 
 
@@ -86,6 +91,8 @@ class DoubleCheck:
     so one type covers "discovered double check" too."""
 
     id = "DOUBLE_CHECK"
+    requires = "check"
+    tier = "fast"
     version = 1
 
     def detect(self, ctx: MoveContext) -> list[Event]:
@@ -95,7 +102,7 @@ class DoubleCheck:
         if len(checkers) < 2:
             return []
         return [event(ctx, self.id, checkers=checkers, is_checkmate=ctx.facts.is_checkmate)]
-`,T=`import chess
+`,A=`import chess
 
 from chesstrove.detectors.base import Event, event
 from chesstrove.models import MoveContext
@@ -106,6 +113,8 @@ class ThreePlusQueens:
     drops below 3 and later comes back."""
 
     id = "THREE_PLUS_QUEENS"
+    requires = "three_queens"
+    tier = "fast"
     version = 1
 
     def detect(self, ctx: MoveContext) -> list[Event]:
@@ -116,7 +125,7 @@ class ThreePlusQueens:
         return [event(ctx, self.id, total=f.queens_after,
                       white=chess.popcount(board.queens & board.occupied_co[chess.WHITE]),
                       black=chess.popcount(board.queens & board.occupied_co[chess.BLACK]))]
-`,S=`import chess
+`,R=`import chess
 
 from chesstrove.detectors.base import Event, checker_squares, event
 from chesstrove.models import MoveContext
@@ -126,6 +135,8 @@ class EnPassantCheckmate:
     """An en passant capture that mates, whether the pawn checks directly or uncovers a line."""
 
     id = "EN_PASSANT_CHECKMATE"
+    requires = "checkmate"
+    tier = "fast"
     version = 1
 
     def detect(self, ctx: MoveContext) -> list[Event]:
@@ -139,6 +150,8 @@ class KingDeliveredMate:
     mate or castling where the rook mates. Castling counts."""
 
     id = "KING_DELIVERED_MATE"
+    requires = "checkmate"
+    tier = "fast"
     version = 1
 
     def detect(self, ctx: MoveContext) -> list[Event]:
@@ -155,36 +168,59 @@ class MissedMateInOne:
     """
 
     id = "MISSED_MATE_IN_ONE"
+    requires = "not_checkmate"
+    tier = "deep"
     version = 1
 
     def detect(self, ctx: MoveContext) -> list[Event]:
         if ctx.facts.is_checkmate:
             return []
-        mates = mating_moves(ctx.board_before)
+        mates = mating_moves(ctx.board_before, ctx.legal_before)
         if not mates:
             return []
         return [event(ctx, self.id, mating_moves=mates, played=ctx.san)]
 
 
-def mating_moves(board: chess.Board) -> list[str]:
-    """SAN of every legal move that mates. Pushes and pops, leaving the board as it was."""
+def mating_moves(board: chess.Board, legal: list[chess.Move] | None = None) -> list[str]:
+    """SAN of every legal move that mates, sorted. Pushes and pops, leaving the board as it was.
+
+    Only a checking move can mate, and a move checks only if the moved (or promoted) piece attacks the king from its
+    new square, or it uncovers one of the mover's sliders (it was the only piece between that slider and the king),
+    or it's castling or en passant (rare: always tried). That is decided with bitboards, exactly, before the one
+    expensive step (push, is_checkmate, pop). \`legal\`: the moves replay already generated, if any.
+    """
     king = board.king(not board.turn)
     if king is None:
         return []
-    # A move can only check if it lands on a line/knight-jump to the king, or leaves a line to it
-    # (discovery). Castling and en passant are rare; let gives_check handle them.
-    rays, knight_jumps = chess.BB_RAYS[king], chess.BB_KNIGHT_ATTACKS[king]
+    us = board.turn
+    ours, occupied = board.occupied_co[us], board.occupied
+    # the mover's own pieces that alone stand between one of the mover's sliders and the king
+    lines = ((chess.BB_RANK_ATTACKS[king][0] | chess.BB_FILE_ATTACKS[king][0]) & (board.rooks | board.queens)
+             | chess.BB_DIAG_ATTACKS[king][0] & (board.bishops | board.queens))
+    uncovers = 0
+    for sniper in chess.scan_reversed(lines & ours):
+        between = chess.between(king, sniper) & occupied
+        if between and between & (between - 1) == 0:  # exactly one piece in the way
+            uncovers |= between
+    uncovers &= ours
+    king_file, king_rank = chess.square_file(king), chess.square_rank(king)
+    pawn_squares = chess.BB_PAWN_ATTACKS[not us][king]  # where one of our pawns would attack the king
     mates = []
-    for move in board.legal_moves:
-        could_check = (
-            rays[move.from_square] or rays[move.to_square] or knight_jumps & chess.BB_SQUARES[move.to_square]
-            or board.is_castling(move) or board.is_en_passant(move)
-        )
-        if not could_check:
-            continue
-        # ponytail: gives_check is push/pop (~3µs); ~10 candidates/ply but <1 checks. A bitboard check
-        # test would halve this detector's cost (~57µs/ply now) if full-history analysis gets slow.
-        if not board.gives_check(move):  # exact test; mate needs check
+    for move in (legal if legal is not None else board.legal_moves):
+        frm, to = move.from_square, move.to_square
+        checks = bool(chess.BB_SQUARES[frm] & uncovers) or board.is_castling(move) or board.is_en_passant(move)
+        if not checks:
+            piece = move.promotion or board.piece_type_at(frm)
+            if piece == chess.KNIGHT:
+                checks = bool(chess.BB_KNIGHT_ATTACKS[king] & chess.BB_SQUARES[to])
+            elif piece == chess.PAWN:
+                checks = bool(pawn_squares & chess.BB_SQUARES[to])
+            elif piece != chess.KING and chess.BB_RAYS[to][king]:
+                diagonal = abs(chess.square_file(to) - king_file) == abs(chess.square_rank(to) - king_rank)
+                if (piece == chess.QUEEN or (piece == chess.BISHOP) == diagonal) \\
+                        and not chess.between(to, king) & (occupied & ~chess.BB_SQUARES[frm]):
+                    checks = True
+        if not checks:
             continue
         board.push(move)
         mated = board.is_checkmate()
@@ -192,7 +228,7 @@ def mating_moves(board: chess.Board) -> list[str]:
         if mated:
             mates.append(board.san(move))
     return sorted(mates)
-`,C=`"""Named mating patterns (Epaulette, Anastasia's, Boden's, ...): family, then form.
+`,P=`"""Named mating patterns (Epaulette, Anastasia's, Boden's, ...): family, then form.
 
 These names have no single rigid definition across chess sources, so each pattern answers three
 separate questions about the final position:
@@ -705,6 +741,8 @@ def box(m: Mate) -> Match | None:
 
 
 class NamedMate:
+    requires = "checkmate"  # anatomy() is None otherwise
+    tier = "fast"
     version = 3  # 2: family/form split, events carry form and traits. 3: Hook takes the pawn-backed chain from Arabian; every ladder is textbook; swallow's tail textbook needs only the two tail blockers
 
     def __init__(self, id: str, test: Callable[[Mate], Match | None]):
@@ -727,7 +765,7 @@ NAMED_MATES = tuple(NamedMate(f"{name.upper()}_MATE", test) for name, test in (
     ("greco", greco), ("hook", hook), ("corridor", corridor), ("blackburne", blackburne),
     ("reti", reti), ("pillsbury", pillsbury), ("ladder", ladder), ("box", box),
 ))
-`,M=`import re
+`,B=`import re
 
 from chesstrove.detectors.base import Event, event, piece_name
 from chesstrove.models import MoveContext
@@ -741,13 +779,15 @@ class DoubleDisambiguatedSan:
     PGN's text, because some sites over-disambiguate. Pawns never qualify."""
 
     id = "DOUBLE_DISAMBIGUATED_SAN"
+    requires = "piece_move"
+    tier = "fast"
     version = 1
 
     def detect(self, ctx: MoveContext) -> list[Event]:
         if not DOUBLE_DISAMBIGUATED.match(ctx.san):
             return []
         return [event(ctx, self.id, san=ctx.san, piece=piece_name(ctx.facts.piece), from_square=ctx.facts.from_square)]
-`,A=`"""Named mating patterns, defined only by the final position's geometry."""
+`,D=`"""Named mating patterns, defined only by the final position's geometry."""
 
 import chess
 
@@ -770,6 +810,8 @@ class SmotheredMate:
     The knight may be part of a double check."""
 
     id = "SMOTHERED_MATE"
+    requires = "checkmate"
+    tier = "fast"
     version = 2  # v2: squares covered by the mating knight itself count (v1 required all to be own pieces)
 
     def detect(self, ctx: MoveContext) -> list[Event]:
@@ -796,6 +838,8 @@ class BackRankMate:
     that are merely attacked don't count."""
 
     id = "BACK_RANK_MATE"
+    requires = "checkmate"
+    tier = "fast"
     version = 1
 
     def detect(self, ctx: MoveContext) -> list[Event]:
@@ -816,7 +860,7 @@ class BackRankMate:
         return [event(ctx, self.id, king_square=chess.square_name(king),
                       checker=chess.square_name(rank_checkers[0]),
                       checker_piece=chess.piece_name(board.piece_type_at(rank_checkers[0])))]
-`,R=`import chess
+`,O=`import chess
 
 from chesstrove.detectors.base import Event, event, piece_name
 from chesstrove.models import MoveContext
@@ -828,6 +872,8 @@ class Underpromotion:
     needs the engine layer."""
 
     id = "UNDERPROMOTION"
+    requires = "underpromotion"
+    tier = "fast"
     version = 2  # v2: queen_gives_check, queen_gives_mate, queen_stalemates
 
     def detect(self, ctx: MoveContext) -> list[Event]:
@@ -847,6 +893,8 @@ class PromotionCheckmate:
     """A promotion (to any piece) that mates, including discovered mates where the new piece doesn't check."""
 
     id = "PROMOTION_CHECKMATE"
+    requires = "checkmate"
+    tier = "fast"
     version = 1
 
     def detect(self, ctx: MoveContext) -> list[Event]:
@@ -856,7 +904,7 @@ class PromotionCheckmate:
         promoted_piece_checks = ctx.move.to_square in ctx.board_after.checkers()
         return [event(ctx, self.id, promotion_piece=piece_name(f.promotion), square=f.to_square,
                       promoted_piece_checks=promoted_piece_checks)]
-`,P="",B=`"""Chess.com public API -> CanonicalGame.
+`,I="",F=`"""Chess.com public API -> CanonicalGame.
 
 https://www.chess.com/news/view/published-data-api
   /pub/player/{user}/games/archives  -> {"archives": [".../games/2024/01", ...]}
@@ -945,7 +993,7 @@ def _opening_from_eco_url(url: str | None) -> str | None:
     if not url or "/openings/" not in url:
         return None
     return urllib.parse.unquote(url.split("/openings/", 1)[1]).replace("-", " ") or None
-`,O=`"""PGN text -> CanonicalGame.
+`,G=`"""PGN text -> CanonicalGame.
 
 Every importer yields CanonicalGame | ParseFailure. The Chess.com and Lichess APIs both return PGN,
 so their importers fetch, then reuse to_canonical() with their own source/metadata.
@@ -1090,7 +1138,7 @@ def _played_at(h: chess.pgn.Headers) -> datetime | None:
         except ValueError:
             continue
     return None  # "????.??.??" or partial dates
-`,D=`"""The deterministic indexer: replay a game, run the detectors, and produce exactly the rows the database stores
+`,U=`"""The deterministic indexer: replay a game, run the detectors, and produce exactly the rows the database stores
 (the packed game_moves row and the event rows). No database, network, filesystem or environment: the server
 importer runs it natively, and the public site runs this same file in the visitor's browser (Pyodide, in a Web
 Worker: web/src/indexer), then uploads the rows. One definition, so the two can't drift.
@@ -1099,7 +1147,7 @@ Everything here must stay importable in Pyodide: the standard library and python
 """
 
 import json
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import datetime
 from typing import Any
 
@@ -1114,18 +1162,41 @@ GAME_FIELDS = ("source_key", "source", "external_id", "played_at", "white", "bla
                "result", "time_control", "rated", "eco", "opening", "initial_fen", "chess960", "pgn")
 
 
+# The first pass is everything a player page needs; the deep pass is what's expensive and not needed for the
+# headline (MISSED_MATE_IN_ONE: a mistake, not a rare moment, and ~40% of all indexing time on its own).
+FAST = tuple(d for d in DETECTORS if d.tier == "fast")
+DEEP = tuple(d for d in DETECTORS if d.tier == "deep")
+
+# When a detector can possibly fire. Each detector names (\`requires\`) the first condition its own detect() checks,
+# so skipping it on other plies changes nothing: tests/test_indexing.py compares against every detector on every
+# ply. A mate on the board is ~1 ply in 100, so most detectors run on almost none.
+GATES: dict[str, Callable[[MoveFacts], bool]] = {
+    "any": lambda f: True,
+    "checkmate": lambda f: f.is_checkmate,
+    "not_checkmate": lambda f: not f.is_checkmate,
+    "check": lambda f: f.is_check,
+    "underpromotion": lambda f: f.promotion in ("N", "B", "R"),
+    "three_queens": lambda f: f.queens_after >= 3,
+    "piece_move": lambda f: f.piece != "P",  # SAN like Qh4e1 starts with a piece letter
+}
+
+
 def versions(detectors: Sequence[Detector] = DETECTORS) -> dict[str, int]:
     return {d.id: d.version for d in detectors}
 
 
 def analyze(game: CanonicalGame, detectors: Sequence[Detector]) -> tuple[list[MoveFacts], list[tuple[Detector, Event]]]:
-    """One replay; every detector sees every ply."""
+    """One replay; each detector sees the plies its precondition allows (GATES). No FEN strings are built unless an
+    event needs its position."""
+    gated = [(GATES[getattr(d, "requires", "any")], d) for d in detectors]  # undeclared: every ply
     facts: list[MoveFacts] = []
     events: list[tuple[Detector, Event]] = []
-    for ctx in replay(game):
-        facts.append(ctx.facts)
-        for detector in detectors:
-            events.extend((detector, e) for e in detector.detect(ctx))
+    for ctx in replay(game, fens=False):
+        f = ctx.facts
+        facts.append(f)
+        for gate, detector in gated:
+            if gate(f):
+                events.extend((detector, e) for e in detector.detect(ctx))
     return facts, events
 
 
@@ -1152,9 +1223,9 @@ def event_rows(events: list[tuple[Detector, Event]]) -> list[dict[str, Any]]:
              "fen": e.fen, "metadata": e.metadata} for d, e in events]
 
 
-def index_game(game: CanonicalGame, detectors: Sequence[Detector] = DETECTORS) -> dict[str, Any]:
+def index_game(game: CanonicalGame, detectors: Sequence[Detector] = FAST) -> dict[str, Any]:
     """Everything the database stores for one game: its columns, packed moves (None for a game with no moves)
-    and events."""
+    and events. Default: the first pass (FAST), which is what the browser indexes."""
     facts, events = analyze(game, detectors)
     row = {f: getattr(game, f) for f in GAME_FIELDS}
     row["played_at"] = game.played_at.isoformat() if game.played_at else None
@@ -1171,7 +1242,7 @@ def game_from_row(row: dict[str, Any]) -> CanonicalGame:
 
 def index_chesscom_archive(archive_json: str) -> str:
     """The browser worker's entry point: one Chess.com monthly archive (JSON text) in, the indexed games out
-    (JSON text), with the parse outcome counted the way the server importer counts it."""
+    (JSON text, first pass), with the parse outcome counted the way the server importer counts it."""
     games, skipped, errors = [], 0, []
     for index, item in enumerate(games_in_archive(json.loads(archive_json)), start=1):
         if isinstance(item, ParseFailure):
@@ -1185,7 +1256,20 @@ def index_chesscom_archive(archive_json: str) -> str:
         except Exception as e:  # the server importer records these and moves on; so does the browser
             errors.append({"index": index, "error": f"{type(e).__name__}: {e}"})
     return json.dumps({"games": games, "skipped": skipped, "errors": errors})
-`,I=`"""Core, source-independent data types."""
+
+
+def deep_scan(games_json: str) -> str:
+    """The browser worker's deep pass over games already stored: [{source_key, initial_fen, chess960, uci}] in,
+    [{source_key, events}] out, for the DEEP detectors only."""
+    out = []
+    for g in json.loads(games_json):
+        game = CanonicalGame(source="chesscom", source_key=g["source_key"], external_id=None, played_at=None, white=None,
+                             black=None, white_rating=None, black_rating=None, result="*", time_control=None, rated=None,
+                             eco=None, opening=None, initial_fen=g["initial_fen"], moves_uci=tuple(g["uci"].split()),
+                             pgn="", chess960=g["chess960"])
+        out.append({"source_key": g["source_key"], "events": event_rows(analyze(game, DEEP)[1])})
+    return json.dumps(out)
+`,K=`"""Core, source-independent data types."""
 
 from dataclasses import dataclass
 from datetime import datetime
@@ -1238,8 +1322,8 @@ class MoveFacts:
     is_castling: bool
     is_en_passant: bool
     promotion: str | None  # uppercase piece letter, or None
-    fen_before: str
-    fen_after: str
+    fen_before: str | None  # None when replayed with fens=False (indexing: see MoveContext.board_before.fen())
+    fen_after: str | None
     queens_before: int
     queens_after: int
     material_white: int  # after the move, P=1 N=3 B=3 R=5 Q=9
@@ -1262,7 +1346,8 @@ class MoveContext:
     board_after: chess.Board
     san: str
     facts: MoveFacts
-`,F=`"""One-pass replay of a game's mainline into MoveContexts."""
+    legal_before: list[chess.Move] | None = None  # the mover's legal moves, already generated to count them
+`,j=`"""One-pass replay of a game's mainline into MoveContexts."""
 
 from collections.abc import Iterator
 
@@ -1285,20 +1370,22 @@ def start_board(game: CanonicalGame) -> chess.Board:
     return chess.Board(game.initial_fen or chess.STARTING_FEN, chess960=game.chess960)
 
 
-def replay(game: CanonicalGame) -> Iterator[MoveContext]:
+def replay(game: CanonicalGame, fens: bool = True) -> Iterator[MoveContext]:
     """Replay the mainline once, yielding a context per ply.
 
-    board_after is the live board and is only valid until the next iteration.
+    board_after is the live board and is only valid until the next iteration. fens=False skips the two FEN strings
+    per ply (a tenth of indexing time) and leaves facts.fen_before/fen_after None: an event takes its position from
+    board_before instead, the same string (tests/test_reconstruction.py).
     """
     board = start_board(game)
-    fen_before = board.fen()
+    fen_before = board.fen() if fens else None
     queens_before = queen_count(board)
     for ply, uci in enumerate(game.moves_uci, start=1):
         move = board.parse_uci(uci)  # raises IllegalMoveError on corrupt input
 
         # ponytail: one Board.copy per ply (~µs); switch detectors to push/pop on one board if the benchmark says so
         board_before = board.copy(stack=False)
-        legal_moves_before = board.legal_moves.count()
+        legal = list(board.legal_moves)  # counted and stored; MISSED_MATE_IN_ONE reuses the list
         san = board.san(move)
         piece = board.piece_type_at(move.from_square)
         is_en_passant = board.is_en_passant(move)
@@ -1310,7 +1397,7 @@ def replay(game: CanonicalGame) -> Iterator[MoveContext]:
 
         board.push(move)
 
-        fen_after = board.fen()
+        fen_after = board.fen() if fens else None
         queens_after = queen_count(board)
         facts = MoveFacts(
             ply=ply,
@@ -1332,8 +1419,8 @@ def replay(game: CanonicalGame) -> Iterator[MoveContext]:
             queens_after=queens_after,
             material_white=material(board, chess.WHITE),
             material_black=material(board, chess.BLACK),
-            legal_moves_before=legal_moves_before,
+            legal_moves_before=len(legal),
         )
-        yield MoveContext(game, ply, board_before, move, board, san, facts)
+        yield MoveContext(game, ply, board_before, move, board, san, facts, legal)
         fen_before, queens_before = fen_after, queens_after
-`;function G(n,e,t){const r=new Set(e.filter(o=>o<t));return n.map(o=>o.split("/games/")[1]).filter(o=>o&&!r.has(o)).sort().reverse()}function U(n,e){const t=[];for(let r=0;r<n.length;r+=e)t.push({games:n.slice(r,r+e),last:r+e>=n.length});return t.length?t:[{games:[],last:!0}]}async function m(n,e,t,r=fetch,o=s=>new Promise(c=>setTimeout(c,s))){let s=2e3;for(let c=0;;c++){try{const a=await r(n,e);if(a.ok||a.status<500&&a.status!==429&&a.status!==408)return a}catch{}if(c===7)throw new Error(`${t} didn't answer`);await o(s),s=Math.min(s*2,3e4)}}const b="https://cdn.jsdelivr.net/pyodide/v0.28.3/full/",K="/py/python-chess-1.11.2.zip",j=Object.assign({"../../../src/chesstrove/__init__.py":x,"../../../src/chesstrove/detectors/__init__.py":q,"../../../src/chesstrove/detectors/base.py":N,"../../../src/chesstrove/detectors/checks.py":E,"../../../src/chesstrove/detectors/material.py":T,"../../../src/chesstrove/detectors/mates.py":S,"../../../src/chesstrove/detectors/named_mates.py":C,"../../../src/chesstrove/detectors/notation.py":M,"../../../src/chesstrove/detectors/patterns.py":A,"../../../src/chesstrove/detectors/promotion.py":R,"../../../src/chesstrove/importers/__init__.py":P,"../../../src/chesstrove/importers/chesscom.py":B,"../../../src/chesstrove/importers/pgn.py":O,"../../../src/chesstrove/indexing.py":D,"../../../src/chesstrove/models.py":I,"../../../src/chesstrove/reconstruction.py":F}),_=n=>postMessage(n),l=async(n,e)=>{const t=performance.now();try{return await e()}finally{_({type:"timing",name:n,ms:performance.now()-t})}};class f extends Error{}async function Q(){const{loadPyodide:n}=await import(`${b}pyodide.mjs`),e=await n({indexURL:b}),t="/home/pyodide";e.unpackArchive(await(await m(K,void 0,"ChessTrove")).arrayBuffer(),"zip",{extractDir:t});for(const[r,o]of Object.entries(j)){const s=`${t}/chesstrove/${r.split("/src/chesstrove/")[1]}`;e.FS.mkdirTree(s.slice(0,s.lastIndexOf("/"))),e.FS.writeFile(s,o)}return e.runPython("import json, chesstrove.indexing as ix"),{index:e.globals.get("ix").index_chesscom_archive,versions:JSON.parse(e.runPython("json.dumps(ix.versions())"))}}async function L(n){const e={type:"progress",phase:"loading",archivesTotal:0,archivesDone:0,month:null,analyzed:0,uploaded:0,events:0,uploading:!1},t=()=>_({...e});t();const r=await l("pyodide",Q);if(JSON.stringify(r.versions)!==JSON.stringify(n.versions))throw new f("This page is older than ChessTrove's server. Reload the page to continue.");e.phase="listing",t();const o=`https://api.chess.com/pub/player/${encodeURIComponent(n.username)}/games`,s=await l("fetch",()=>m(`${o}/archives`,void 0,"Chess.com"));if(s.status===404)throw new f(`Chess.com has no player called “${n.username}”.`);const c=new Date().toISOString().slice(0,7).replace("-","/"),a=G((await s.json()).archives??[],n.monthsDone,c);e.archivesTotal=a.length,e.phase="indexing",t();const y=async(h,d,p)=>{var k;const u=JSON.stringify({versions:n.versions,month:h,month_complete:p,games:d.games,skipped:d.skipped,errors:d.errors});e.uploading=!0,t();const i=await l("upload",()=>m(`${n.apiBase}/api/indexing/${n.importId}/batches`,{method:"POST",headers:{"Content-Type":"application/json","X-Import-Token":n.token},body:u},"ChessTrove's server"));if(!i.ok){const v=((k=await i.json().catch(()=>({})))==null?void 0:k.detail)??`error ${i.status}`;throw new f(i.status===409?String(v):`ChessTrove's server refused a batch (${v}).`)}const w=await i.json();e.uploaded+=d.games.length,e.events+=w.events,e.uploading=!1,t(),p&&_({type:"month",month:h})};let g=Promise.resolve();for(const h of a){e.month=h,t();const d=await l("fetch",()=>m(`${o}/${h}`,void 0,"Chess.com")),p=JSON.parse(await d.text());for(const u of U(p.games??[],n.batchSize)){const i=JSON.parse(await l("analyze",()=>r.index(JSON.stringify({games:u.games}))));e.analyzed+=i.games.length,t(),await g,g=y(h,i,u.last)}e.archivesDone+=1,t()}if(await g,!(await m(`${n.apiBase}/api/indexing/${n.importId}/finish`,{method:"POST",headers:{"X-Import-Token":n.token}},"ChessTrove's server")).ok)throw new f("ChessTrove's server didn't accept the finished import.");e.phase="done",e.month=null,t()}self.onmessage=n=>{L(n.data).catch(e=>_({type:"error",message:e instanceof Error?e.message:String(e),retry:!(e instanceof f)}))};
+`;const Q=(n,e)=>e>=1?0:n*(1-e)/e;function L(n,e,t){const r=new Set(e.filter(s=>s<t));return n.map(s=>s.split("/games/")[1]).filter(s=>s&&!r.has(s)).sort().reverse()}function w(n,e){const t=[];for(let r=0;r<n.length;r+=e)t.push({games:n.slice(r,r+e),last:r+e>=n.length});return t.length?t:[{games:[],last:!0}]}async function h(n,e,t,r=fetch,s=o=>new Promise(a=>setTimeout(a,o))){let o=2e3;for(let a=0;;a++){try{const i=await r(n,e);if(i.ok||i.status<500&&i.status!==429&&i.status!==408)return i}catch{}if(a===7)throw new Error(`${t} didn't answer`);await s(o),o=Math.min(o*2,3e4)}}const y="https://cdn.jsdelivr.net/pyodide/v0.28.3/full/",H="/py/python-chess-1.11.2.zip",V=Object.assign({"../../../src/chesstrove/__init__.py":E,"../../../src/chesstrove/detectors/__init__.py":S,"../../../src/chesstrove/detectors/base.py":C,"../../../src/chesstrove/detectors/checks.py":M,"../../../src/chesstrove/detectors/material.py":A,"../../../src/chesstrove/detectors/mates.py":R,"../../../src/chesstrove/detectors/named_mates.py":P,"../../../src/chesstrove/detectors/notation.py":B,"../../../src/chesstrove/detectors/patterns.py":D,"../../../src/chesstrove/detectors/promotion.py":O,"../../../src/chesstrove/importers/__init__.py":I,"../../../src/chesstrove/importers/chesscom.py":F,"../../../src/chesstrove/importers/pgn.py":G,"../../../src/chesstrove/indexing.py":U,"../../../src/chesstrove/models.py":K,"../../../src/chesstrove/reconstruction.py":j}),k=n=>postMessage(n),z=n=>new Promise(e=>setTimeout(e,n)),d=async(n,e)=>{const t=performance.now();try{return await e()}finally{k({type:"timing",name:n,ms:performance.now()-t})}};class _ extends Error{}async function x(){const{loadPyodide:n}=await import(`${y}pyodide.mjs`),e=await n({indexURL:y}),t="/home/pyodide";e.unpackArchive(await(await h(H,void 0,"ChessTrove")).arrayBuffer(),"zip",{extractDir:t});for(const[s,o]of Object.entries(V)){const a=`${t}/chesstrove/${s.split("/src/chesstrove/")[1]}`;e.FS.mkdirTree(a.slice(0,a.lastIndexOf("/"))),e.FS.writeFile(a,o)}e.runPython("import json, chesstrove.indexing as ix");const r=e.globals.get("ix");return{index:r.index_chesscom_archive,deep:r.deep_scan,fast:JSON.parse(e.runPython("json.dumps(ix.versions(ix.FAST))")),deepVersions:JSON.parse(e.runPython("json.dumps(ix.versions(ix.DEEP))"))}}async function N(n,e){const t=performance.now(),r=await d("analyze",e),s=Q(performance.now()-t,n);return s>0&&await d("rest",()=>z(s)),r}const b=async n=>{var t;const e=((t=await n.json().catch(()=>({})))==null?void 0:t.detail)??`error ${n.status}`;return new _(n.status===409?String(e):`ChessTrove's server refused a batch (${e}).`)},q=(n,e)=>JSON.stringify(n)===JSON.stringify(e),T="This page is older than ChessTrove's server. Reload the page to continue.";async function $(n){const e={type:"progress",phase:"loading",archivesTotal:0,archivesDone:0,month:null,analyzed:0,uploaded:0,events:0,uploading:!1},t=()=>k({...e});t();const r=await d("pyodide",x);if(!q(r.fast,n.versions))throw new _(T);e.phase="listing",t();const s=`https://api.chess.com/pub/player/${encodeURIComponent(n.username)}/games`,o=await d("fetch",()=>h(`${s}/archives`,void 0,"Chess.com"));if(o.status===404)throw new _(`Chess.com has no player called “${n.username}”.`);const a=new Date().toISOString().slice(0,7).replace("-","/"),i=L((await o.json()).archives??[],n.monthsDone,a);e.archivesTotal=i.length,e.phase="indexing",t();const g=async(f,p,v)=>{const c=JSON.stringify({versions:n.versions,month:f,month_complete:v,games:p.games,skipped:p.skipped,errors:p.errors});e.uploading=!0,t();const l=await d("upload",()=>h(`${n.apiBase}/api/indexing/${n.importId}/batches`,{method:"POST",headers:{"Content-Type":"application/json","X-Import-Token":n.token},body:c},"ChessTrove's server"));if(!l.ok)throw await b(l);const u=await l.json();e.uploaded+=p.games.length,e.events+=u.events,e.uploading=!1,t(),v&&k({type:"month",month:f})};let m=Promise.resolve();for(const f of i){e.month=f,t();const p=await d("fetch",()=>h(`${s}/${f}`,void 0,"Chess.com")),v=JSON.parse(await p.text());let c={games:[],skipped:0,errors:[]};for(const l of w(v.games??[],n.slice)){const u=JSON.parse(await N(n.duty,()=>r.index(JSON.stringify({games:l.games}))));e.analyzed+=u.games.length,t(),c={games:[...c.games,...u.games],skipped:c.skipped+u.skipped,errors:[...c.errors,...u.errors]},(c.games.length>=n.batchSize||l.last)&&(await m,m=g(f,c,l.last),c={games:[],skipped:0,errors:[]})}e.archivesDone+=1,t()}if(await m,!(await h(`${n.apiBase}/api/indexing/${n.importId}/finish`,{method:"POST",headers:{"X-Import-Token":n.token}},"ChessTrove's server")).ok)throw new _("ChessTrove's server didn't accept the finished import.");e.phase="done",e.month=null,t()}async function W(n){const e={type:"progress",phase:"loading",archivesTotal:0,archivesDone:0,month:null,analyzed:0,uploaded:0,events:0,uploading:!1},t=()=>k({...e});t();const r=await d("pyodide",x);if(!q(r.deepVersions,n.versions))throw new _(T);e.phase="deep",t();const s={"X-Import-Token":n.token};for(;;){const o=await d("fetch",()=>h(`${n.apiBase}/api/indexing/deep/${n.runId}/games`,{headers:s},"ChessTrove's server"));if(!o.ok)throw await b(o);const a=await o.json();if(!a.length)break;let i=[];for(const m of w(a,n.slice))i=[...i,...JSON.parse(await N(n.duty,()=>r.deep(JSON.stringify(m.games))))],e.analyzed+=m.games.length,t();e.uploading=!0,t();const g=await d("upload",()=>h(`${n.apiBase}/api/indexing/deep/${n.runId}/batches`,{method:"POST",headers:{"Content-Type":"application/json",...s},body:JSON.stringify({versions:n.versions,games:i})},"ChessTrove's server"));if(!g.ok)throw await b(g);e.uploaded+=a.length,e.events+=(await g.json()).events,e.uploading=!1,t()}await h(`${n.apiBase}/api/indexing/deep/${n.runId}/finish`,{method:"POST",headers:s},"ChessTrove's server"),e.phase="done",t()}self.onmessage=n=>{(n.data.type==="deep"?W(n.data):$(n.data)).catch(e=>k({type:"error",message:e instanceof Error?e.message:String(e),retry:!(e instanceof _)}))};

@@ -52,12 +52,12 @@ def client(dsn, conn, monkeypatch):
 
 def session(client) -> tuple[int, dict]:
     r = client.post("/api/indexing/chesscom", json={"username": "Alice"}).json()
-    assert r["mode"] == "index" and r["versions"] == indexing.versions()
+    assert r["mode"] == "index" and r["versions"] == indexing.versions(indexing.FAST)
     return r["import_id"], {"X-Import-Token": r["token"]}
 
 
 def batch(games, month=PAST, complete=True, **extra) -> dict:
-    return {"versions": indexing.versions(), "month": month, "month_complete": complete, "games": games, **extra}
+    return {"versions": indexing.versions(indexing.FAST), "month": month, "month_complete": complete, "games": games, **extra}
 
 
 def snapshot(conn) -> dict:
@@ -90,14 +90,38 @@ def test_browser_batches_store_exactly_what_the_server_importer_stores(client, c
     r = client.post(f"/api/indexing/{import_id}/batches", headers=auth,
                     json=batch(out["games"], skipped=out["skipped"], errors=out["errors"]))
     assert r.status_code == 200, r.text
-    assert r.json() == {"stored": 5, "duplicate": 0, "events": len(server["events"])}
-    assert strip_ids(snapshot(conn)) == server
+    fast = [e for e in server["events"] if e["detector_id"] != "MISSED_MATE_IN_ONE"]
+    assert r.json() == {"stored": 5, "duplicate": 0, "events": len(fast)}
     assert client.post(f"/api/indexing/{import_id}/finish", headers=auth).status_code == 200
     imp = db.get_import(conn, import_id)
     assert (imp["status"], imp["games_imported"], imp["games_skipped"]) == ("completed", 5, 1)
     assert imp["resume_state"]["months_done"] == [PAST] and imp["games_expected"] == 5
+    first = strip_ids(snapshot(conn))
+    assert first["events"] == fast  # the first pass claims only what it ran:
+    assert all("MISSED_MATE_IN_ONE" not in a["detector_versions"] for a in first["analysis"])
     summary = client.get("/api/players/chesscom/alice").json()  # the page doesn't care who indexed it
-    assert summary["games"] == 5 and summary["rare_moments"]["mine"] >= 1
+    assert summary["games"] == 5 and summary["rare_moments"]["mine"] >= 1 and summary["deep_pending"] == 5
+
+    # the deep pass, later: then everything equals what the server importer stored
+    deep = run_deep(client, "alice")
+    assert deep["games"] == 5 and strip_ids(snapshot(conn)) == server
+    assert client.get("/api/players/chesscom/alice").json()["deep_pending"] == 0
+    assert client.post("/api/indexing/chesscom/deep", json={"username": "alice"}).json() == {"mode": "done", "pending": 0}
+
+
+def run_deep(client, username: str) -> dict:
+    """What the browser's deep pass does: take pending games, run indexing.deep_scan, send the events back."""
+    r = client.post("/api/indexing/chesscom/deep", json={"username": username}).json()
+    assert r["mode"] == "index" and r["versions"] == indexing.versions(indexing.DEEP)
+    auth, run = {"X-Import-Token": r["token"]}, r["run_id"]
+    total = {"games": 0, "events": 0}
+    while games := client.get(f"/api/indexing/deep/{run}/games", headers=auth).json():
+        found = json.loads(indexing.deep_scan(json.dumps(games)))
+        ack = client.post(f"/api/indexing/deep/{run}/batches", headers=auth,
+                          json={"versions": r["versions"], "games": found}).json()
+        total = {k: total[k] + ack[k] for k in total}
+    assert client.post(f"/api/indexing/deep/{run}/finish", headers=auth).status_code == 200
+    return total
 
 
 def test_repeated_and_overlapping_batches_are_harmless(client, conn):
@@ -169,7 +193,7 @@ def test_sessions_versions_and_limits(client, conn, monkeypatch):
     url = f"/api/indexing/{import_id}/batches"
     assert client.post(url, headers={"X-Import-Token": "guess"}, json=batch(games)).status_code == 403
     assert client.post(url, json=batch(games)).status_code == 422  # no token at all
-    stale = {**batch(games), "versions": {**indexing.versions(), "SMOTHERED_MATE": 0}}
+    stale = {**batch(games), "versions": {**indexing.versions(indexing.FAST), "SMOTHERED_MATE": 0}}
     assert client.post(url, headers=auth, json=stale).status_code == 409
     monkeypatch.setattr(browser_import, "MAX_GAMES", 2)
     assert client.post(url, headers=auth, json=batch(games)).status_code == 422
@@ -236,3 +260,48 @@ def test_the_browser_runtime_produces_exactly_the_native_output():
     games = json.loads(native)["games"]
     forms = {e["metadata"]["form"] for g in games for e in g["events"] if "form" in e["metadata"]}
     assert len(games) == 56 and forms == {"textbook", "characteristic", "variant"}
+
+
+def test_deep_pass_is_checked_idempotent_and_resumable(client, conn):
+    import_id, auth = session(client)
+    client.post(f"/api/indexing/{import_id}/batches", headers=auth, json=batch(indexed()["games"]))
+    r = client.post("/api/indexing/chesscom/deep", json={"username": "alice"}).json()
+    token, run = {"X-Import-Token": r["token"]}, r["run_id"]
+    games = client.get(f"/api/indexing/deep/{run}/games", headers=token).json()
+    found = json.loads(indexing.deep_scan(json.dumps(games)))
+    url, v = f"/api/indexing/deep/{run}/batches", indexing.versions(indexing.DEEP)
+    # another browser meanwhile: told to watch; this one (with its token) resumes the same scan
+    assert client.post("/api/indexing/chesscom/deep", json={"username": "alice"}).json()["mode"] == "watch"
+    again = client.post("/api/indexing/chesscom/deep", json={"username": "alice", "run_id": run, "token": r["token"]}).json()
+    assert (again["mode"], again["run_id"]) == ("index", run)
+    # refusals: wrong token, stale versions, a first-pass detector, an event past the game, someone else's game
+    assert client.post(url, headers={"X-Import-Token": "x"}, json={"versions": v, "games": found}).status_code == 403
+    assert client.post(url, headers=token, json={"versions": {"MISSED_MATE_IN_ONE": 0}, "games": found}).status_code == 409
+    forged = copy.deepcopy(found)
+    forged[0]["events"] = [{"detector_id": "SMOTHERED_MATE", "detector_version": 2, "ply": 1, "type": "SMOTHERED_MATE",
+                            "color": "w", "fen": "x", "metadata": {}}]
+    assert client.post(url, headers=token, json={"versions": v, "games": forged}).status_code == 422
+    assert client.post(url, headers=token, json={"versions": v, "games": [{"source_key": "chesscom:999", "events": []}]}).status_code == 422
+    # the same batch twice: events replaced, not doubled
+    for _ in range(2):
+        assert client.post(url, headers=token, json={"versions": v, "games": found}).status_code == 200
+    n = conn.execute("SELECT count(*) AS n FROM events WHERE detector_id = 'MISSED_MATE_IN_ONE'").fetchone()["n"]
+    assert n == sum(len(g["events"]) for g in found)
+    assert client.get(f"/api/indexing/deep/{run}/games", headers=token).json() == []
+
+
+def test_every_detector_declares_its_gate_and_pass():
+    from chesstrove.detectors import DETECTORS
+    assert all(d.requires in indexing.GATES and d.tier in ("fast", "deep") for d in DETECTORS)
+    assert [d.id for d in indexing.DEEP] == ["MISSED_MATE_IN_ONE"] and len(indexing.FAST) + 1 == len(DETECTORS)
+
+
+@pytest.mark.skipif(not (WEB / "node_modules/pyodide").exists(), reason="needs `npm install` in web/ (Pyodide)")
+def test_the_browser_deep_pass_produces_exactly_the_native_output():
+    games = [{"source_key": g["source_key"], "initial_fen": g["initial_fen"], "chess960": g["chess960"],
+              "uci": g["moves"]["uci"] if g["moves"] else ""}
+             for g in json.loads(indexing.index_chesscom_archive(json.dumps({"games": ARCHIVE["games"] + mate_positions()})))["games"]]
+    native = indexing.deep_scan(json.dumps(games))
+    browser = subprocess.run(["node", "checks/pyodide-core.mjs", "deep"], cwd=WEB, input=json.dumps(games),
+                             capture_output=True, text=True, check=True).stdout
+    assert json.loads(browser) == json.loads(native) and len(json.loads(native)) == 56

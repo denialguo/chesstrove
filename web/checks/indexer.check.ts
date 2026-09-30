@@ -1,7 +1,8 @@
 // The indexing worker's pure parts: which months, in what order, in what batches, and retrying uploads.
 // Run: npm run check
 import assert from "node:assert/strict";
-import { batches, fetchRetry, monthsToIndex } from "../src/indexer/protocol";
+import { batches, DUTY, fetchRetry, monthsToIndex, restFor } from "../src/indexer/protocol";
+import { speed } from "../src/indexer/indexer";
 
 const url = (m: string) => `https://api.chess.com/pub/player/alice/games/${m}`;
 const archives = ["2023/11", "2024/01", "2024/02", "2024/03"].map(url);
@@ -23,4 +24,10 @@ assert.equal((await fetchRetry("u", undefined, "x", replies(502, "drop", 503, 20
 assert.equal((await fetchRetry("u", undefined, "x", replies(422, 200), noSleep)).status, 422);
 assert.equal((await fetchRetry("u", undefined, "x", replies(429, 200), noSleep)).status, 200);
 await assert.rejects(fetchRetry("u", undefined, "ChessTrove", replies(...Array(8).fill(503)), noSleep), /didn't answer/);
+// pacing: balanced by default (nothing saved), and a slice's rest keeps the worker to its duty cycle
+assert.equal(speed(), "balanced");
+assert.equal(DUTY.balanced, 0.6);
+assert.equal(Math.round(restFor(120, DUTY.balanced)), 80); // 120 ms of work, 80 ms of rest: 60% busy
+assert.equal(restFor(120, DUTY.fast), 0);
+assert.ok(DUTY.deep < DUTY.balanced && DUTY.gentle < DUTY.balanced);
 console.log("indexer check ok");

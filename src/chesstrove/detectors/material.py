@@ -9,6 +9,8 @@ class ThreePlusQueens:
     drops below 3 and later comes back."""
 
     id = "THREE_PLUS_QUEENS"
+    requires = "three_queens"
+    tier = "fast"
     version = 1
 
     def detect(self, ctx: MoveContext) -> list[Event]:

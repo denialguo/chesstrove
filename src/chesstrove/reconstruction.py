@@ -21,20 +21,22 @@ def start_board(game: CanonicalGame) -> chess.Board:
     return chess.Board(game.initial_fen or chess.STARTING_FEN, chess960=game.chess960)
 
 
-def replay(game: CanonicalGame) -> Iterator[MoveContext]:
+def replay(game: CanonicalGame, fens: bool = True) -> Iterator[MoveContext]:
     """Replay the mainline once, yielding a context per ply.
 
-    board_after is the live board and is only valid until the next iteration.
+    board_after is the live board and is only valid until the next iteration. fens=False skips the two FEN strings
+    per ply (a tenth of indexing time) and leaves facts.fen_before/fen_after None: an event takes its position from
+    board_before instead, the same string (tests/test_reconstruction.py).
     """
     board = start_board(game)
-    fen_before = board.fen()
+    fen_before = board.fen() if fens else None
     queens_before = queen_count(board)
     for ply, uci in enumerate(game.moves_uci, start=1):
         move = board.parse_uci(uci)  # raises IllegalMoveError on corrupt input
 
         # ponytail: one Board.copy per ply (~µs); switch detectors to push/pop on one board if the benchmark says so
         board_before = board.copy(stack=False)
-        legal_moves_before = board.legal_moves.count()
+        legal = list(board.legal_moves)  # counted and stored; MISSED_MATE_IN_ONE reuses the list
         san = board.san(move)
         piece = board.piece_type_at(move.from_square)
         is_en_passant = board.is_en_passant(move)
@@ -46,7 +48,7 @@ def replay(game: CanonicalGame) -> Iterator[MoveContext]:
 
         board.push(move)
 
-        fen_after = board.fen()
+        fen_after = board.fen() if fens else None
         queens_after = queen_count(board)
         facts = MoveFacts(
             ply=ply,
@@ -68,7 +70,7 @@ def replay(game: CanonicalGame) -> Iterator[MoveContext]:
             queens_after=queens_after,
             material_white=material(board, chess.WHITE),
             material_black=material(board, chess.BLACK),
-            legal_moves_before=legal_moves_before,
+            legal_moves_before=len(legal),
         )
-        yield MoveContext(game, ply, board_before, move, board, san, facts)
+        yield MoveContext(game, ply, board_before, move, board, san, facts, legal)
         fen_before, queens_before = fen_after, queens_after

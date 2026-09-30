@@ -1,72 +1,82 @@
-// The 'Best-move underpromotion' check: Stockfish (in this browser) scores every legal move at each of a
-// player's underpromotions, both sides', and says whether the promotion was the single best move. It's the
-// all_moves probe of the full analysis on its own: a few searches instead of every position, so it runs on
-// one click. Each verdict is saved as soon as it's known.
+// The 'Best-move underpromotion' check: was the player's own underpromotion the single best move? Stockfish (in this
+// browser, one worker) answers it from one search that scores the moves that matter side by side: the played move,
+// the other promotions on the same move (queening is the usual rival: mates and ties hide there), and the engine's
+// own two best moves. Same verdict rules as the full analysis (bestMoveVerdict: transpositions and near-equal
+// scores tie). Scoring every legal move cost 4-5x the nodes for the same verdicts; it also gave an exact rank, which
+// this no longer does. Measured on 19 underpromotions with a native full-analysis verdict: 17 agree (the all-moves
+// probe: 16), never a false "unique best". Each verdict is saved as soon as it's known.
 
 import { Chess } from "chessops/chess";
 import { parseFen } from "chessops/fen";
+import { makeUci } from "chessops/util";
 import { api, type Platform } from "../lib/api";
 import { bestMoveVerdict, type BestMove } from "./archaeology";
-import { BASELINE_NODES, CONFIG, workersFor } from "./runner";
+import { BASELINE_NODES, CONFIG } from "./runner";
 import { playerKey, store } from "./store";
 import { UciEngine } from "./uci";
 
-export interface UpVerdict { key: string; mine: boolean; best: BestMove; rank: number | null; legal: number }
+export interface UpVerdict { key: string; mine: boolean; best: BestMove }
 
-const PROBE = { nodes_per_line: 1_000_000, max_depth: 30, mate_depth: 20 }; // as the full analysis (runner.ts)
-const prefix = (platform: string, user: string) => playerKey(`${CONFIG}|upcheck-v3`, platform, user);
+// nodes per candidate move; 100k-500k gave identical verdicts on the test set, so this is headroom, not precision
+const PROBE = { nodes_per_line: 250_000, max_depth: 30, mate_depth: 20 };
+const prefix = (platform: string, user: string) => playerKey(`${CONFIG}|upcheck-v4`, platform, user);
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-function legalMoves(fen: string): number {
+function legalUcis(fen: string): string[] {
   const pos = Chess.fromSetup(parseFen(fen).unwrap()).unwrap();
-  let count = 0;
+  const out: string[] = [];
   for (const [from, dests] of pos.allDests()) {
     const pawn = pos.board.get(from)?.role === "pawn";
-    for (const to of dests) count += pawn && (to >> 3 === 0 || to >> 3 === 7) ? 4 : 1;
+    for (const to of dests) {
+      if (pawn && (to >> 3 === 0 || to >> 3 === 7)) for (const p of ["queen", "rook", "bishop", "knight"] as const) out.push(makeUci({ from, to, promotion: p }));
+      else out.push(makeUci({ from, to }));
+    }
   }
-  return count;
+  return out;
 }
 
 export const savedVerdicts = (platform: string, user: string) => store.items<UpVerdict>(prefix(platform, user));
 
-/** The player's underpromotions (theirs and their opponents'). */
-export async function underpromotions(platform: Platform, user: string) {
-  const [mine, against] = await Promise.all([api.events(platform, user, "UNDERPROMOTION", 1000), api.eventsAgainst(platform, user, "UNDERPROMOTION", 1000)]);
-  return [...mine.map((e) => ({ e, mine: true })), ...against.map((e) => ({ e, mine: false }))];
-}
+/** The player's own underpromotions. Their opponents' are in the index too, but not Stockfish-checked by default. */
+export const underpromotions = (platform: Platform, user: string) => api.events(platform, user, "UNDERPROMOTION", 1000);
 
 export async function checkUnderpromotions(platform: Platform, user: string, onVerdict: (v: UpVerdict, done: number, total: number) => void,
-                                           opts: { workers?: number; signal?: AbortSignal } = {}) {
+                                           opts: { signal?: AbortSignal } = {}) {
   const done = new Set((await savedVerdicts(platform, user)).map((v) => v.key));
-  const todo = (await underpromotions(platform, user)).filter(({ e }) => !done.has(`${e.game_id}:${e.ply}`));
-  const games = new Map<number, Promise<Awaited<ReturnType<typeof api.game>>>>();
+  const todo = (await underpromotions(platform, user)).filter((e) => !done.has(`${e.game_id}:${e.ply}`));
   if (!todo.length || opts.signal?.aborted) return;
-  const engines = await Promise.all(Array.from({ length: Math.min(opts.workers ?? workersFor("balanced"), todo.length) }, () => UciEngine.start()));
-  const stop = () => engines.forEach((x) => x.terminate()); // leaving the page stops it; saved verdicts stay
+  const engine = await UciEngine.start(); // one worker: a few seconds of search, not worth a second core's heat
+  const stop = () => engine.terminate(); // leaving the page stops it; saved verdicts stay
   opts.signal?.addEventListener("abort", stop);
-  let next = 0, finished = 0;
+  let finished = 0;
   try {
-    await Promise.all(engines.map(async (engine) => {
-      while (next < todo.length && !opts.signal?.aborted) {
-        const { e, mine } = todo[next++];
-        if (!games.has(e.game_id)) games.set(e.game_id, api.game(String(e.game_id)));
-        const g = await games.get(e.game_id)!;
-        const req = { fen: g.initial_fen, moves: g.moves.slice(0, e.ply - 1).map((m) => m.uci) };
+    for (const e of todo) {
+      if (opts.signal?.aborted) break;
+      const started = performance.now();
+      const g = await api.game(String(e.game_id));
+      const req = { fen: g.initial_fen, moves: g.moves.slice(0, e.ply - 1).map((m) => m.uci) };
+      const legal = legalUcis(e.fen);
+      let best: BestMove = "unknown";
+      if (legal.length === 1) best = "unique_best";
+      else {
         await engine.newGame();
         const base = await engine.analyse({ ...req, nodes: BASELINE_NODES });
-        const legal = legalMoves(e.fen);
         const depth = Math.min(base.mate !== null ? PROBE.mate_depth : base.depth ?? 12, PROBE.max_depth);
         await engine.newGame();
-        const out = await engine.probe({ ...req, nodes: PROBE.nodes_per_line * legal, depth, lines: legal });
-        const color = e.color;
-        const verdict = bestMoveVerdict(e.fen, e.uci, color, legal,
-          out ? { kind: "all_moves", moves: [], results: out.lines, budget: {} } : undefined);
-        const v: UpVerdict = { key: `${e.game_id}:${e.ply}`, mine, best: verdict.best, rank: verdict.rank, legal };
-        await store.putItem(`${prefix(platform, user)}|${v.key}`, v);
-        onVerdict(v, ++finished, todo.length);
+        const top = await engine.probe({ ...req, nodes: PROBE.nodes_per_line * 2, depth, lines: 2 });
+        const rivals = ["q", "r", "b", "n"].map((p) => e.uci.slice(0, 4) + p).filter((u) => legal.includes(u));
+        const cand = [...new Set([e.uci, ...rivals, ...(top?.lines ?? []).map((l) => l.uci)])];
+        await engine.newGame();
+        const out = await engine.probe({ ...req, nodes: PROBE.nodes_per_line * cand.length, depth, lines: cand.length, searchmoves: cand });
+        best = bestMoveVerdict(e.fen, e.uci, e.color, cand.length, out ? { kind: "all_moves", moves: [], results: out.lines, budget: {} } : undefined).best;
       }
-    }));
-  } catch (e) {
-    if (!opts.signal?.aborted) throw e;
+      const v: UpVerdict = { key: `${e.game_id}:${e.ply}`, mine: true, best };
+      await store.putItem(`${prefix(platform, user)}|${v.key}`, v);
+      onVerdict(v, ++finished, todo.length);
+      await sleep((performance.now() - started) * 0.5); // rest between positions: a third of the time idle
+    }
+  } catch (err) {
+    if (!opts.signal?.aborted) throw err;
   } finally {
     opts.signal?.removeEventListener("abort", stop);
     stop();

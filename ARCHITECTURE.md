@@ -105,6 +105,31 @@ limited to a real-looking Chess.com id and this player). Every game keeps its ra
 re-derived with the same code later. Server CPU per history: 4.8 s natively for 3,689 games, against 30 s for
 the server importer.
 
+**Two passes, gated detectors, paced work** (built). Profiling the analyzer (native, DankSonPotato) showed where a
+game's time went: `MISSED_MATE_IN_ONE` 39%, counting legal moves 12%, PGN parsing 10.5%, a FEN string every ply
+10.5%, SAN 5%; the other 28 detectors together ~9%, board copies 1%. So:
+- **FAST and DEEP.** Each detector has a `tier`. FAST is everything a player page needs (every rare-moment
+  detector, all named mates); DEEP is `MISSED_MATE_IN_ONE`, a mistake rather than a rare moment and never in the
+  headline. The browser indexes FAST first; `game_analysis` then records only FAST versions, so nothing pretends
+  DEEP ran. DEEP runs afterwards over the stored games (`/api/indexing/chesscom/deep`, its own `analysis_runs`
+  row with a `session`, resumable: the server knows which games lack the DEEP version), gently, and on phones
+  only when asked. The server importer (CLI, Lichess) still runs both at once.
+- **Gating.** Each detector declares `requires`, the first condition its own `detect()` checks (`checkmate`,
+  `check`, `underpromotion`, ...), and the indexer calls it only on plies where that holds (`indexing.GATES`).
+  A mate is ~1 ply in 100, so most detectors now run on almost nothing.
+- **No FEN unless needed.** `replay(fens=False)` skips the two FEN strings per ply; an event takes its position
+  from `board_before`, the identical string.
+- **A tighter missed-mate scan.** A move can only mate by checking; whether it checks is decided exactly with
+  bitboards (the moved or promoted piece attacks the king from its new square, or it was the only piece between
+  one of the mover's sliders and the king; castling and en passant always tried), and the legal moves replay
+  already generated are reused.
+- **Paced work.** The worker analyses 25 games per call and rests in proportion (`DUTY`: 60% "balanced" by
+  default, 30% for DEEP, less on touch devices), so no core is pinned.
+
+`tests/reference_indexer.py` freezes the analyzer as it was before all of this; `tests/test_indexing.py` requires
+identical packed moves and events (type, ply, color, FEN, metadata) on the fixtures, and the whole 3,689-game
+history was checked the same way: zero differences, every event in exactly one pass.
+
 **Measured** (MacBook, Chrome; DankSonPotato, 3,689 games, 48 months; results identical to the server importer):
 
 | | Server importer (native, local DB) | Browser indexing (Pyodide, 1 worker) |
@@ -119,6 +144,22 @@ Hikaru (68,535 games, 520 variants skipped, fetched live): first games on the pa
 3.7 minutes, the whole history in 25.7 minutes on one worker (20.6 ms a game; memory flat at ~370 MB). Reloading
 mid-import and pressing Continue carries on with the same import: the finished history was identical, with only
 the half-done month's 4 games uploaded twice (counted as duplicates).
+
+After the two passes, gating and pacing (same machine, quiet, Chrome; "core %" is the tab's measured CPU time over
+wall time, 100% = one core pinned):
+
+| DankSonPotato, 3,689 games | Before (one pass) | Balanced (default) | Fast (opt-in) |
+|---|---|---|---|
+| First games on the page | 2.2 s | 2.3 s | 2.3 s |
+| Core history (every rare moment) | 62.9 s | 44.9 s | 28.5 s |
+| CPU spent | 57.5 core-s | 24.1 core-s | 22.5 core-s |
+| Average / seconds above 90% of a core | 92% / 77% of the run | 53% / 0% | 81% / 30% |
+| Deep pass (missed mates in one) | included above | +88 s at 30% of a core (27 core-s) | |
+| Peak tab memory | 350 MB | 357 MB | 380 MB |
+
+A 212-game history: core in 5.7 s, deep done at 12.7 s. Hikaru, stopped at 10,068 games: 146 s at 56% of a core,
+never above 90%, memory 278 → 319 → 313 MB by minute. In Pyodide (Node, same corpus) the first pass costs 15.2 ms a
+game against 40.3 ms before; the deep pass on its own 16 ms a game.
 
 ## Layout
 
@@ -872,17 +913,23 @@ behind it.
 - Chess960 games are skipped for now.
 
 **Best-move underpromotion.** This collection row sits next to Underpromotion and needs Stockfish. It
-counts underpromotions, the player's and their opponents', that were the single best of all legal moves.
-- Players ChessTrove analysed natively get the server's verdicts (`insights.best_underpromotions`, from the
-  all_moves probes).
-- Everyone else sees it locked, with a "Check with Stockfish" button. The check runs only the all_moves
-  searches, one per underpromotion (`engine/underpromotions.ts`): a 25k-node baseline for the depth target,
-  then every legal move scored. It shares the verdict code with the record book.
-- Each verdict is saved to IndexedDB as it's found, and a partial check offers to do the rest.
-- Small checks run without a click: up to 25 underpromotions, which is under 30 s on one worker. They run
-  only on capable devices, 2.5 s after the page settles, once per browser, and stop if the visitor leaves.
-  This is the one exception to "the engine only runs when asked". Bigger histories keep the link.
-- It takes about 2 s per underpromotion across two workers: Hikaru's 216 take about 4 minutes.
+counts the player's own underpromotions that were the single best move. (Opponents' underpromotions are in the
+index, and players analysed natively still get both sides from the server's all_moves probes,
+`insights.best_underpromotions`; the browser checks only the player's own.)
+- Everyone else sees it locked, with a "Check with Stockfish" button; nothing runs without the click. One worker.
+- Per underpromotion (`engine/underpromotions.ts`): a 25k-node baseline for the depth target, a two-line search
+  for the engine's own best moves, then **one** search that scores, side by side, the played move, the other
+  promotions on the same move (queening is the usual rival: equal mates and ties hide there) and those best moves,
+  250k nodes each. The verdict is the record book's (`bestMoveVerdict`: transpositions and near-equal scores tie),
+  over those candidates. No rank: that would need every legal move scored.
+- Why not cheaper: a plain two-line search (MultiPV 2) or "the played move vs the best other move" in separate
+  searches both got real cases wrong, including false "unique best" where queening mates just as well (the narrow
+  search never looked at it). Measured with the browser's engine on 19 underpromotions that have a native
+  full-analysis verdict: every legal move scored (the old way) agreed on 16; the candidate search on 17, never a
+  false unique best, at 100k-500k nodes per candidate alike, with 4-5x fewer nodes.
+- DankSonPotato in Chrome: 10 of his own in 7.0 s at 50% of one core (3.2 core-seconds), against 13 (both sides)
+  in 7.9 s on two workers at 160% (12.2 core-seconds) before; the same verdicts on his 10.
+- Each verdict is saved to IndexedDB as it's found (`upcheck-v4`), and a partial check offers to do the rest.
 
 **Workers.** Balanced 2, Fast min(4, cores − 1), Max cores − 1. A constrained device gets one worker whatever
 the setting: ≤ 4 cores, ≤ 4 GB `deviceMemory`, or a coarse pointer.

@@ -26,6 +26,8 @@ export interface PlayerSummary {
   best_underpromotions?: { total: number; judged: number; mine: number; against: number; found: string[] } | null;
   engine: { games_analyzed: number; positions_analyzed: number; config: { engine_name: string; limit_kind: string; limit_value: number } } | null;
   latest_import: Import | null;
+  /** Stored games the deep pass (missed mates in one) hasn't seen yet. */
+  deep_pending?: number;
 }
 export interface EventRow {
   id: number; game_id: number; ply: number; type: string; color: "w" | "b"; fen: string; fen_after: string;
@@ -85,7 +87,16 @@ export type IndexingSession =
   | { mode: "index"; import_id: number; token: string; months_done: string[]; versions: Record<string, number>; max_games: number }
   | { mode: "watch" | "done"; import_id: number };
 
+export type DeepSession =
+  | { mode: "index"; run_id: number; token: string; pending: number; versions: Record<string, number> }
+  | { mode: "watch"; run_id: number; pending: number } | { mode: "done"; pending: 0 };
+
 export const api = {
+  /** Start (or carry on with) the deep pass over a player's stored games. */
+  startDeep: (username: string, resume?: { run_id: number; token: string }) =>
+    request<DeepSession>("/indexing/chesscom/deep", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ username, ...resume }),
+    }),
   /** Start (or carry on with) indexing a Chess.com history in this browser (web/src/indexer). */
   startIndexing: (username: string, resume?: { import_id: number; token: string }) =>
     request<IndexingSession>("/indexing/chesscom", {

@@ -160,6 +160,49 @@ def touch_browser_import(conn: psycopg.Connection, import_id: int, month_done: s
         {"now": datetime.now(UTC).isoformat(), "month": month_done, "id": import_id})
 
 
+def deep_pending(conn: psycopg.Connection, platform: str, username: str, versions: dict[str, int]) -> int:
+    """A player's stored games not yet seen by these (deep-pass) detector versions."""
+    return conn.execute(
+        f"""SELECT count(*) AS n FROM games g LEFT JOIN game_analysis a ON a.game_id = g.id
+            WHERE {_player_games()} AND NOT coalesce(a.detector_versions @> %(v)s, false)""",
+        {"platform": platform, "player": username, "v": Jsonb(versions)}).fetchone()["n"]
+
+
+def deep_pending_games(conn: psycopg.Connection, platform: str, username: str, versions: dict[str, int], limit: int) -> list[dict]:
+    return conn.execute(
+        f"""SELECT g.source_key, g.initial_fen, g.chess960, coalesce(gm.uci, '') AS uci
+            FROM games g LEFT JOIN game_analysis a ON a.game_id = g.id LEFT JOIN game_moves gm ON gm.game_id = g.id
+            WHERE {_player_games()} AND NOT coalesce(a.detector_versions @> %(v)s, false)
+            ORDER BY g.played_at DESC NULLS LAST, g.id DESC LIMIT %(limit)s""",
+        {"platform": platform, "player": username, "v": Jsonb(versions), "limit": limit}).fetchall()
+
+
+def deep_game_rows(conn: psycopg.Connection, keys: list[str]) -> list[dict]:
+    return conn.execute(
+        """SELECT g.id, g.source_key, g.white, g.black, g.ply_count, g.initial_fen, g.chess960,
+                  gm.first_color, coalesce(gm.uci, '') AS uci
+           FROM games g LEFT JOIN game_moves gm ON gm.game_id = g.id WHERE g.source_key = ANY(%s)""", (keys,)).fetchall()
+
+
+def running_deep_session(conn: psycopg.Connection, platform: str, username: str) -> dict | None:
+    return conn.execute(
+        """SELECT * FROM analysis_runs WHERE status = 'running' AND session->>'platform' = %s
+           AND session->>'username' = %s ORDER BY id DESC LIMIT 1""", (platform, username.lower())).fetchone()
+
+
+def get_analysis_run(conn: psycopg.Connection, run_id: int) -> dict | None:
+    return conn.execute("SELECT * FROM analysis_runs WHERE id = %s", (run_id,)).fetchone()
+
+
+def set_run_session(conn: psycopg.Connection, run_id: int, session: dict) -> None:
+    conn.execute("UPDATE analysis_runs SET session = %s WHERE id = %s", (Jsonb(session), run_id))
+
+
+def touch_run_session(conn: psycopg.Connection, run_id: int) -> None:
+    conn.execute("UPDATE analysis_runs SET session = session || jsonb_build_object('last_seen', %s::text) WHERE id = %s",
+                 (datetime.now(UTC).isoformat(), run_id))
+
+
 def fail_running_imports(conn: psycopg.Connection, reason: str) -> None:
     conn.execute("""UPDATE imports SET status = 'failed', finished_at = now(), errors = errors || %s
                     WHERE status = 'running'""", (Jsonb([{"error": reason}]),))

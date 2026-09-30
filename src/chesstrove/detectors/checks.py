@@ -7,6 +7,8 @@ class DoubleCheck:
     so one type covers "discovered double check" too."""
 
     id = "DOUBLE_CHECK"
+    requires = "check"
+    tier = "fast"
     version = 1
 
     def detect(self, ctx: MoveContext) -> list[Event]:

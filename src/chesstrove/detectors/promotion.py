@@ -10,6 +10,8 @@ class Underpromotion:
     needs the engine layer."""
 
     id = "UNDERPROMOTION"
+    requires = "underpromotion"
+    tier = "fast"
     version = 2  # v2: queen_gives_check, queen_gives_mate, queen_stalemates
 
     def detect(self, ctx: MoveContext) -> list[Event]:
@@ -29,6 +31,8 @@ class PromotionCheckmate:
     """A promotion (to any piece) that mates, including discovered mates where the new piece doesn't check."""
 
     id = "PROMOTION_CHECKMATE"
+    requires = "checkmate"
+    tier = "fast"
     version = 1
 
     def detect(self, ctx: MoveContext) -> list[Event]:

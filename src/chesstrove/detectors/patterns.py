@@ -21,6 +21,8 @@ class SmotheredMate:
     The knight may be part of a double check."""
 
     id = "SMOTHERED_MATE"
+    requires = "checkmate"
+    tier = "fast"
     version = 2  # v2: squares covered by the mating knight itself count (v1 required all to be own pieces)
 
     def detect(self, ctx: MoveContext) -> list[Event]:
@@ -47,6 +49,8 @@ class BackRankMate:
     that are merely attacked don't count."""
 
     id = "BACK_RANK_MATE"
+    requires = "checkmate"
+    tier = "fast"
     version = 1
 
     def detect(self, ctx: MoveContext) -> list[Event]:

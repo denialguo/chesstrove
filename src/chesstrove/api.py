@@ -175,6 +175,54 @@ async def indexing_batch(import_id: int, request: Request, x_import_token: Annot
         raise _rejected(e) from None
 
 
+class DeepStart(BaseModel):
+    username: str = Field(min_length=1, max_length=50, pattern=r"^[A-Za-z0-9_-]+$")
+    run_id: int | None = None  # this browser's earlier deep session, to carry on with
+    token: str | None = Field(None, max_length=100)
+
+
+@api.post("/indexing/chesscom/deep")
+def start_deep(body: DeepStart, c: Conn) -> dict:
+    """Start (or adopt) the deep pass over a player's stored games (browser_import.start_deep)."""
+    return browser_import.start_deep(c, body.username, (body.run_id, body.token) if body.run_id and body.token else None)
+
+
+@api.get("/indexing/deep/{run_id}/games")
+def deep_games(run_id: int, x_import_token: Annotated[str, Header()], c: Conn) -> list[dict]:
+    try:
+        return browser_import.deep_games(c, run_id, x_import_token)
+    except browser_import.Rejected as e:
+        raise _rejected(e) from None
+
+
+@api.post("/indexing/deep/{run_id}/batches")
+async def deep_batch(run_id: int, request: Request, x_import_token: Annotated[str, Header()]) -> dict:
+    raw = await request.body()
+    if len(raw) > MAX_BATCH_BYTES:
+        raise HTTPException(413, "batch too large")
+    try:
+        body = json.loads(raw)
+    except ValueError:
+        raise HTTPException(422, "expected JSON") from None
+
+    def store() -> dict:
+        with db.connect() as c:
+            return browser_import.store_deep(c, run_id, x_import_token, body)
+    try:
+        return await run_in_threadpool(store)
+    except browser_import.Rejected as e:
+        raise _rejected(e) from None
+
+
+@api.post("/indexing/deep/{run_id}/finish")
+def finish_deep(run_id: int, x_import_token: Annotated[str, Header()], c: Conn) -> dict:
+    try:
+        browser_import.finish_deep(c, run_id, x_import_token)
+    except browser_import.Rejected as e:
+        raise _rejected(e) from None
+    return {"status": "completed"}
+
+
 @api.post("/indexing/{import_id}/finish")
 def finish_indexing(import_id: int, x_import_token: Annotated[str, Header()], c: Conn) -> dict:
     try:
@@ -267,7 +315,8 @@ def player(platform: Platform, username: Username, c: Conn) -> dict:
     the latest import. `games: 0` with no import means "not imported yet". `best_underpromotions`: the
     native index's verdicts, or null if it has none for this player."""
     summary = db.player_summary(c, platform, username)
-    return {**summary, "latest_import": _public_import(summary["latest_import"]),
+    deep = db.deep_pending(c, platform, username, browser_import.DEEP_VERSIONS) if summary["games"] else 0
+    return {**summary, "latest_import": _public_import(summary["latest_import"]), "deep_pending": deep,
             "best_underpromotions": insights.best_underpromotions(c, platform, username)}
 
 

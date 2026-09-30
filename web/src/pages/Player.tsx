@@ -12,7 +12,7 @@ import { api, type Motif, ApiError, PLATFORM_NAME, type EventRow, type Platform,
 import { formatDate, formatMonth, moveLabel, n, plural, roughDuration } from "../lib/format";
 import { BEST_UNDERPROMOTION, COUNTED, FORM_HELP, FORM_NAME, MATE_FORMS, MOTIFS, NAMED_MATES, formBadge, formNote, type MotifInfo } from "../lib/motifs";
 import { supported } from "../engine/runner";
-import { Indexer, supported as indexingSupported, type State as IndexState } from "../indexer/indexer";
+import { Indexer, speed, supported as indexingSupported, type DeepState, type State as IndexState } from "../indexer/indexer";
 import { checkUnderpromotions, savedVerdicts, type UpVerdict } from "../engine/underpromotions";
 
 const POLL_MS = 2000;
@@ -31,6 +31,15 @@ export function Player() {
   const local = useSyncExternalStore(useCallback((fn: () => void) => ix?.subscribe(fn) ?? (() => {}), [ix]),
                                      () => ix?.state ?? null);
   const [ask, setAsk] = useState<null | "confirm" | "continue">(null);
+  const deep = ix?.deep ?? null;
+  // the deep pass (missed mates in one) starts by itself on computers, gently, once the history is in; on phones it
+  // waits to be asked. Its results refresh the page when it's done.
+  const deepPending = summary?.deep_pending ?? 0;
+  const importRunning = summary?.latest_import?.status === "running";
+  useEffect(() => {
+    if (ix && deepPending > 0 && !importRunning && ix.deep.status === "idle" && !touch()) void ix.startDeep();
+  }, [ix, deepPending, importRunning]);
+  const deepDone = deep?.status === "done";
   const samples = useRef<[number, number][]>([]); // (time, games stored) while an import runs: the rate behind the estimate
 
   const load = useCallback(async () => {
@@ -78,6 +87,8 @@ export function Player() {
         : "down");
     }
   }, [platform, username, ix]);
+
+  useEffect(() => { if (deepDone) load(); }, [deepDone, load]);
 
   const indexHere = async () => {
     setAsk(null);
@@ -169,12 +180,17 @@ export function Player() {
         <div className="case__plate" aria-live="polite">
           {ix && (ask || (local && local.status !== "idle" && local.status !== "done")) ? (
             <IndexPlate state={local} ask={ask} games={summary.games} expected={expected} left={importLeft} name={name}
-              onStart={indexHere} onPause={() => ix.pause()} />
+              onStart={indexHere} onPause={() => ix.pause()} onFaster={() => void ix.faster()} />
           ) : <p>
             {running
               ? `Importing from ${PLATFORM_NAME[platform]}${expected ? `: ${n(summary.games)} of ${platform === "chesscom" ? "about " : ""}${n(expected)} read so far` : ""}${importLeft ? `, ${importLeft} left` : ""}. Motifs appear as games arrive; you can leave and come back.`
               : <><span className="num">{n(summary.wins)}</span> wins · <span className="num">{n(summary.draws)}</span> draws · <span className="num">{n(summary.losses)}</span> losses</>}
+            {!running && local?.status === "done" && <> · Indexed on this device; rare moments are ready.</>}
           </p>}
+          {ix && !running && (summary.deep_pending ?? 0) > 0 && deep && (
+            <DeepLine deep={deep} pending={summary.deep_pending ?? 0} total={summary.games}
+              onStart={() => ix.startDeep()} onPause={() => ix.pauseDeep()} />
+          )}
         </div>
       </div>
 
@@ -308,7 +324,8 @@ function BestUnderpromotionRow({ platform, username, name, mineTotal, againstTot
   platform: Platform; username: string; name: string; mineTotal: number; againstTotal: number;
   server: PlayerSummary["best_underpromotions"] | null;
 }) {
-  const total = mineTotal + againstTotal;
+  // the native index judged both sides; the browser check judges the player's own underpromotions only
+  const total = server ? mineTotal + againstTotal : mineTotal;
   const [saved, setSaved] = useState<UpVerdict[] | null>(null);
   const [checking, setChecking] = useState<{ done: number; total: number } | null>(null);
   const [failed, setFailed] = useState<string | null>(null);
@@ -323,36 +340,35 @@ function BestUnderpromotionRow({ platform, username, name, mineTotal, againstTot
   const verdicts = server ? null : saved ?? [];
   const found = useMemo(() => new Set(server ? server.found : (verdicts ?? []).filter((v) => v.best === "unique_best").map((v) => v.key)),
     [server, verdicts]);
-  const mine = server ? server.mine : (verdicts ?? []).filter((v) => v.best === "unique_best" && v.mine).length;
-  const against = server ? server.against : (verdicts ?? []).filter((v) => v.best === "unique_best" && !v.mine).length;
+  const mine = server ? server.mine : (verdicts ?? []).filter((v) => v.best === "unique_best").length;
+  const against = server ? server.against : null; // not checked in the browser
   const judged = server ? server.judged : (verdicts ?? []).length;
   const locked = !server && judged === 0;
   const remaining = server ? 0 : total - judged;
 
   const leaving = useRef(new AbortController());
   useEffect(() => () => leaving.current.abort(), []);
-  const check = async (workers?: number) => {
+  const check = async () => {
     setFailed(null);
     setChecking({ done: 0, total: remaining });
     try {
       await checkUnderpromotions(platform, username, (v, done, all) => {
         setSaved((s) => [...(s ?? []), v]);
         setChecking({ done, total: all });
-      }, { workers, signal: leaving.current.signal });
+      }, { signal: leaving.current.signal });
     } catch (e) {
       setFailed(e instanceof Error ? e.message : String(e));
     }
     if (!leaving.current.signal.aborted) setChecking(null);
   };
 
-  const empty = !locked && mine + against === 0;
+  const empty = !locked && mine + (against ?? 0) === 0;
   const panelId = "motif-BEST_UNDERPROMOTION";
   // the same numbers as the Underpromotion row above: theirs on the left, against them on the right
-  const both = `${n(mineTotal)} by ${name}${againstTotal ? ` and ${n(againstTotal)} against` : ""}`;
   const note = !canRun && !server ? "Needs a browser that can run Stockfish."
-    : checking ? `Stockfish is checking the underpromotions on this device: ${checking.done} of ${checking.total}.`
-    : locked ? `Stockfish can check which of the underpromotions above (${both}) was the single best move, on this device, in ${roughDuration((total * 3) / 2)}.`
-    : empty ? `None of the ${plural(judged, "underpromotion")} Stockfish checked was the single best move.`
+    : checking ? `Stockfish is checking ${name}’s underpromotions on this device: ${checking.done} of ${checking.total}.`
+    : locked ? `Stockfish can check which of ${name}’s ${plural(total, "underpromotion")} was the single best move, on this device, in ${roughDuration(total * 0.6)}.`
+    : empty ? `None of ${name}’s ${plural(judged, "underpromotion")} Stockfish checked was the single best move.`
     : BEST_UNDERPROMOTION.definition;
   return (
     <li className={`ledger__row ledger__row--derived ${empty ? "ledger__row--empty" : ""} ${locked ? "ledger__row--locked" : ""} ${open ? "ledger__row--open" : ""}`}>
@@ -367,7 +383,8 @@ function BestUnderpromotionRow({ platform, username, name, mineTotal, againstTot
               <span className="ledger__def">{failed ? `The check stopped: ${failed}.` : note}</span>
             </span>
           </span>
-          {locked ? <span className="ledger__count ledger__count--against ledger__lock" aria-hidden="true">?</span>
+          {against === null ? <span className="ledger__count ledger__count--against" aria-hidden="true" />
+            : locked ? <span className="ledger__count ledger__count--against ledger__lock" aria-hidden="true">?</span>
             : <Digits value={against} className="ledger__count ledger__count--against" />}
           {!empty && !locked && <ChevronDown className="ledger__chev" size={18} aria-hidden="true" />}
         </button>
@@ -380,10 +397,12 @@ function BestUnderpromotionRow({ platform, username, name, mineTotal, againstTot
       </div>
       {open && (
         <div id={panelId} className="ledger__panel">
-          <div className="seg" role="tablist" aria-label="Whose moves">
-            <button role="tab" aria-selected={side === "mine"} disabled={mine === 0} onClick={() => setSide("mine")}>By {name} ({n(mine)})</button>
-            <button role="tab" aria-selected={side === "against"} disabled={against === 0} onClick={() => setSide("against")}>Against ({n(against)})</button>
-          </div>
+          {against !== null && (
+            <div className="seg" role="tablist" aria-label="Whose moves">
+              <button role="tab" aria-selected={side === "mine"} disabled={mine === 0} onClick={() => setSide("mine")}>By {name} ({n(mine)})</button>
+              <button role="tab" aria-selected={side === "against"} disabled={against === 0} onClick={() => setSide("against")}>Against ({n(against)})</button>
+            </div>
+          )}
           <Specimens key={side} platform={platform} username={username} type="UNDERPROMOTION" side={side} only={found} />
         </div>
       )}
@@ -430,9 +449,9 @@ function Specimens({ platform, username, type, side, only }: {
 }
 
 /** The hero plate while a history is indexed on this device (or could be). Counts are the server's: what's stored. */
-function IndexPlate({ state, ask, games, expected, left, name, onStart, onPause }: {
+function IndexPlate({ state, ask, games, expected, left, name, onStart, onPause, onFaster }: {
   state: IndexState | null; ask: null | "confirm" | "continue"; games: number; expected: number | null; left: string | null;
-  name: string; onStart: () => void; onPause: () => void;
+  name: string; onStart: () => void; onPause: () => void; onFaster: () => void;
 }) {
   const of = expected ? ` of about ${n(expected)}` : "";
   const pct = expected ? ` (${Math.min(99, Math.floor((100 * games) / expected))}%)` : "";
@@ -454,12 +473,30 @@ function IndexPlate({ state, ask, games, expected, left, name, onStart, onPause 
     <>
       <p>
         {starting ? "Starting the indexer on this device…"
-          : <>Indexing on this device: {n(games)}{of} games{pct}{left ? `, ${left} left` : ""}.
+          : <>{games === 0 ? "Indexing on this device, newest games first…"
+              : <>Indexing on this device: {n(games)}{of} games{pct}{left ? `, ${left} left` : ""}.</>}
             {state.archivesDone > 0 && " Newest games are in; older months follow."}
             {state.events > 0 && ` ${plural(state.events, "find")} so far.`}
-            {state.uploading && <span className="index-saving"> Saving…</span>}</>}
+            {state.uploading && <span className="index-saving"> Saving…</span>}
+            {speed() === "balanced" && <> <button type="button" className="textlink deep__btn" onClick={onFaster}
+              title="Uses more of this computer: faster, but busier">Go faster</button></>}</>}
       </p>
       {!starting && button("Pause", onPause)}
     </>
   );
+}
+
+/** The deep pass, secondary to the page: a quiet line under the record, never a blocker. */
+function DeepLine({ deep, pending, total, onStart, onPause }: {
+  deep: DeepState; pending: number; total: number; onStart: () => void; onPause: () => void;
+}) {
+  const done = Math.min(total, total - pending + deep.scanned);
+  const button = (label: string, fn: () => void) => <button type="button" className="textlink deep__btn" onClick={fn}>{label}</button>;
+  let text: React.ReactNode;
+  if (deep.status === "running") text = <>Checking for missed mates in one: {n(done)} of {n(total)} games, gently in the background. {button("Pause", onPause)}</>;
+  else if (deep.status === "watching") text = <>Checking for missed mates in one on another device.</>;
+  else if (deep.status === "error") text = <>The missed-mate check stopped: {deep.error} {button("Try again", onStart)}</>;
+  else if (deep.status === "done") return null;
+  else text = <>Missed mates in one aren’t checked yet for {plural(pending, "game")}. {button(deep.status === "paused" ? "Continue" : "Check on this device", onStart)}</>;
+  return <p className="deep">{text}</p>;
 }

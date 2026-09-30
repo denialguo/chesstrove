@@ -31,7 +31,6 @@ from typing import Any
 import psycopg
 
 from chesstrove import db, indexing
-from chesstrove.detectors import DETECTORS
 from chesstrove.importers.pgn import ParseFailure, read_one
 
 MAX_GAMES = 150  # per batch; ~400 KB of JSON
@@ -39,8 +38,9 @@ UNCHECKED_TYPES = {"MISSED_MATE_IN_ONE"}  # a mistake, not a rare moment: sample
 IDLE = timedelta(minutes=3)  # a browser import with no batch for this long is abandoned (tab closed, paused)
 FRESH = timedelta(minutes=10)
 
-VERSIONS = indexing.versions()
-DETECTOR_IDS = {d.id for d in DETECTORS}
+VERSIONS = indexing.versions(indexing.FAST)  # what a first-pass batch was analysed with
+DETECTOR_IDS = set(VERSIONS)
+DEEP_VERSIONS = indexing.versions(indexing.DEEP)
 UCI = re.compile(r"^[a-h][1-8][a-h][1-8][qrbn]?$")
 MONTH = re.compile(r"^\d{4}/(0[1-9]|1[0-2])$")
 RESULTS = {"1-0", "0-1", "1/2-1/2", "*"}
@@ -192,10 +192,10 @@ def _validate_moves(m: Any, n: int) -> None:
             _int(v, lo, hi, f"moves.{key}")
 
 
-def _validate_event(e: Any, n: int, first: str) -> None:
+def _validate_event(e: Any, n: int, first: str, versions: dict[str, int] = VERSIONS) -> None:
     if not isinstance(e, dict) or set(e) != {"detector_id", "detector_version", "ply", "type", "color", "fen", "metadata"}:
         raise Rejected("event: expected the event columns")
-    if e["detector_id"] not in DETECTOR_IDS or e["detector_version"] != VERSIONS[e["detector_id"]] \
+    if e["detector_id"] not in versions or e["detector_version"] != versions[e["detector_id"]] \
             or e["type"] != e["detector_id"]:
         raise Rejected(f"event: unknown detector or version ({e['detector_id']} v{e['detector_version']})")
     _int(e["ply"], 1, n, "event.ply")
@@ -268,3 +268,94 @@ def store(conn: psycopg.Connection, import_id: int, token: str, body: Any) -> di
         done = month if body.get("month_complete") and month and month < datetime.now(UTC).strftime("%Y/%m") else None
         db.touch_browser_import(conn, import_id, done)
     return {"stored": len(stored), "duplicate": len(games) - len(stored), "events": events}
+
+
+# --- the deep pass: DEEP detectors over games already stored (browser: indexing.deep_scan) ---------------------------
+
+DEEP_GAMES = 100  # per request, both ways
+
+
+def start_deep(conn: psycopg.Connection, username: str, resume: tuple[int, str] | None = None) -> dict[str, Any]:
+    """A deep-pass session for a Chess.com player's stored games: `index` (token, games pending), `watch` (another
+    browser is on it), or `done` (nothing pending). Tracked on its own analysis_runs row, so the player's import
+    stays finished while this runs."""
+    username = username.lower()
+    pending = db.deep_pending(conn, "chesscom", username, DEEP_VERSIONS)
+    if not pending:
+        return {"mode": "done", "pending": 0}
+    now = datetime.now(UTC)
+    active = db.running_deep_session(conn, "chesscom", username)
+    if active:
+        s = active["session"]
+        if resume and resume[0] == active["id"] and hmac.compare_digest(s["token_sha256"], _hash(resume[1])):
+            return {"mode": "index", "run_id": active["id"], "token": resume[1], "pending": pending, "versions": DEEP_VERSIONS}
+        if now - datetime.fromisoformat(s["last_seen"]) < IDLE:
+            return {"mode": "watch", "run_id": active["id"], "pending": pending}
+        db.finish_analysis_run(conn, active["id"], "failed")
+    token = secrets.token_urlsafe(24)
+    run_id = db.start_analysis_run(conn, DEEP_VERSIONS)
+    db.set_run_session(conn, run_id, {"client": "browser", "platform": "chesscom", "username": username,
+                                      "token_sha256": _hash(token), "last_seen": now.isoformat()})
+    return {"mode": "index", "run_id": run_id, "token": token, "pending": pending, "versions": DEEP_VERSIONS}
+
+
+def _deep_session(conn: psycopg.Connection, run_id: int, token: str) -> dict:
+    run = db.get_analysis_run(conn, run_id)
+    s = (run or {}).get("session") or {}
+    if not run or not hmac.compare_digest(s.get("token_sha256", ""), _hash(token)):
+        raise Rejected("not your scan", 403)
+    if run["status"] != "running":
+        raise Rejected("this scan has ended; start again", 409)
+    return run
+
+
+def deep_games(conn: psycopg.Connection, run_id: int, token: str) -> list[dict]:
+    """The next games still needing the deep pass, newest first: what indexing.deep_scan takes."""
+    s = _deep_session(conn, run_id, token)["session"]
+    return db.deep_pending_games(conn, s["platform"], s["username"], DEEP_VERSIONS, DEEP_GAMES)
+
+
+def store_deep(conn: psycopg.Connection, run_id: int, token: str, body: Any) -> dict[str, int]:
+    """Deep-pass results for stored games. Same rules as first-pass batches: known detectors at this server's
+    versions, plies inside the game, the mover's color, bounded metadata; one game per batch is replayed here and
+    must match. Rerunning a game replaces its deep events instead of adding to them."""
+    run = _deep_session(conn, run_id, token)
+    s = run["session"]
+    if not isinstance(body, dict) or body.get("versions") != DEEP_VERSIONS:
+        raise Rejected("this page's analyzer is out of date; reload the page", 409)
+    games = body.get("games")
+    if not isinstance(games, list) or len(games) > DEEP_GAMES:
+        raise Rejected(f"games: expected up to {DEEP_GAMES}")
+    keys = [g.get("source_key") if isinstance(g, dict) else None for g in games]
+    if len(set(keys)) != len(keys) or not all(isinstance(k, str) for k in keys):
+        raise Rejected("games: expected distinct source keys")
+    stored = {r["source_key"]: r for r in db.deep_game_rows(conn, keys)}
+    for g in games:
+        row = stored.get(g["source_key"])
+        if row is None or s["username"] not in (row["white"].lower(), row["black"].lower()) \
+                or not row["source_key"].startswith(s["platform"] + ":"):
+            raise Rejected(f"{g['source_key']}: not one of this player's stored games")
+        if set(g) != {"source_key", "events"} or not isinstance(g["events"], list) or len(g["events"]) > 10 * max(row["ply_count"], 1):
+            raise Rejected("a game must have exactly source_key and events")
+        for e in g["events"]:
+            _validate_event(e, row["ply_count"], row["first_color"] or "w", DEEP_VERSIONS)
+    if games:
+        g = random.choice(games)
+        row = stored[g["source_key"]]
+        mine = json.loads(indexing.deep_scan(json.dumps([{k: row[k] for k in ("source_key", "initial_fen", "chess960", "uci")}])))
+        if mine[0]["events"] != g["events"]:
+            raise Rejected(f"{g['source_key']}: deep events don't match its moves")
+    ids = [stored[g["source_key"]]["id"] for g in games]
+    with conn.transaction():
+        db.delete_events(conn, ids, list(DEEP_VERSIONS))
+        db.insert_events(conn, run_id, [(stored[g["source_key"]]["id"], g["events"]) for g in games])
+        db.mark_analyzed(conn, ids, DEEP_VERSIONS)
+        events = sum(len(g["events"]) for g in games)
+        db.record_run_progress(conn, run_id, len(games), events)
+        db.touch_run_session(conn, run_id)
+    return {"games": len(games), "events": events}
+
+
+def finish_deep(conn: psycopg.Connection, run_id: int, token: str) -> None:
+    _deep_session(conn, run_id, token)
+    db.finish_analysis_run(conn, run_id, "completed")

@@ -8,6 +8,8 @@ class EnPassantCheckmate:
     """An en passant capture that mates, whether the pawn checks directly or uncovers a line."""
 
     id = "EN_PASSANT_CHECKMATE"
+    requires = "checkmate"
+    tier = "fast"
     version = 1
 
     def detect(self, ctx: MoveContext) -> list[Event]:
@@ -21,6 +23,8 @@ class KingDeliveredMate:
     mate or castling where the rook mates. Castling counts."""
 
     id = "KING_DELIVERED_MATE"
+    requires = "checkmate"
+    tier = "fast"
     version = 1
 
     def detect(self, ctx: MoveContext) -> list[Event]:
@@ -37,36 +41,59 @@ class MissedMateInOne:
     """
 
     id = "MISSED_MATE_IN_ONE"
+    requires = "not_checkmate"
+    tier = "deep"
     version = 1
 
     def detect(self, ctx: MoveContext) -> list[Event]:
         if ctx.facts.is_checkmate:
             return []
-        mates = mating_moves(ctx.board_before)
+        mates = mating_moves(ctx.board_before, ctx.legal_before)
         if not mates:
             return []
         return [event(ctx, self.id, mating_moves=mates, played=ctx.san)]
 
 
-def mating_moves(board: chess.Board) -> list[str]:
-    """SAN of every legal move that mates. Pushes and pops, leaving the board as it was."""
+def mating_moves(board: chess.Board, legal: list[chess.Move] | None = None) -> list[str]:
+    """SAN of every legal move that mates, sorted. Pushes and pops, leaving the board as it was.
+
+    Only a checking move can mate, and a move checks only if the moved (or promoted) piece attacks the king from its
+    new square, or it uncovers one of the mover's sliders (it was the only piece between that slider and the king),
+    or it's castling or en passant (rare: always tried). That is decided with bitboards, exactly, before the one
+    expensive step (push, is_checkmate, pop). `legal`: the moves replay already generated, if any.
+    """
     king = board.king(not board.turn)
     if king is None:
         return []
-    # A move can only check if it lands on a line/knight-jump to the king, or leaves a line to it
-    # (discovery). Castling and en passant are rare; let gives_check handle them.
-    rays, knight_jumps = chess.BB_RAYS[king], chess.BB_KNIGHT_ATTACKS[king]
+    us = board.turn
+    ours, occupied = board.occupied_co[us], board.occupied
+    # the mover's own pieces that alone stand between one of the mover's sliders and the king
+    lines = ((chess.BB_RANK_ATTACKS[king][0] | chess.BB_FILE_ATTACKS[king][0]) & (board.rooks | board.queens)
+             | chess.BB_DIAG_ATTACKS[king][0] & (board.bishops | board.queens))
+    uncovers = 0
+    for sniper in chess.scan_reversed(lines & ours):
+        between = chess.between(king, sniper) & occupied
+        if between and between & (between - 1) == 0:  # exactly one piece in the way
+            uncovers |= between
+    uncovers &= ours
+    king_file, king_rank = chess.square_file(king), chess.square_rank(king)
+    pawn_squares = chess.BB_PAWN_ATTACKS[not us][king]  # where one of our pawns would attack the king
     mates = []
-    for move in board.legal_moves:
-        could_check = (
-            rays[move.from_square] or rays[move.to_square] or knight_jumps & chess.BB_SQUARES[move.to_square]
-            or board.is_castling(move) or board.is_en_passant(move)
-        )
-        if not could_check:
-            continue
-        # ponytail: gives_check is push/pop (~3µs); ~10 candidates/ply but <1 checks. A bitboard check
-        # test would halve this detector's cost (~57µs/ply now) if full-history analysis gets slow.
-        if not board.gives_check(move):  # exact test; mate needs check
+    for move in (legal if legal is not None else board.legal_moves):
+        frm, to = move.from_square, move.to_square
+        checks = bool(chess.BB_SQUARES[frm] & uncovers) or board.is_castling(move) or board.is_en_passant(move)
+        if not checks:
+            piece = move.promotion or board.piece_type_at(frm)
+            if piece == chess.KNIGHT:
+                checks = bool(chess.BB_KNIGHT_ATTACKS[king] & chess.BB_SQUARES[to])
+            elif piece == chess.PAWN:
+                checks = bool(pawn_squares & chess.BB_SQUARES[to])
+            elif piece != chess.KING and chess.BB_RAYS[to][king]:
+                diagonal = abs(chess.square_file(to) - king_file) == abs(chess.square_rank(to) - king_rank)
+                if (piece == chess.QUEEN or (piece == chess.BISHOP) == diagonal) \
+                        and not chess.between(to, king) & (occupied & ~chess.BB_SQUARES[frm]):
+                    checks = True
+        if not checks:
             continue
         board.push(move)
         mated = board.is_checkmate()
