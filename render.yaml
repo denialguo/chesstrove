@@ -5,7 +5,7 @@ services:
     name: chesstrove
     runtime: python
     plan: free
-    region: oregon
+    region: virginia  # next to the Supabase project (us-east-1); every query crosses this link
     buildCommand: pip install uv && uv sync --frozen --no-dev
     startCommand: .venv/bin/chesstrove serve --host 0.0.0.0
     healthCheckPath: /api/detectors
