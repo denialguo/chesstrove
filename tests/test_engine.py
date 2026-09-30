@@ -18,7 +18,12 @@ TINY = EngineSettings(limit_value=2_000)
 needs_stockfish = pytest.mark.skipif(shutil.which("stockfish") is None, reason="Stockfish not installed")
 
 
-ROOT_SCORES: dict[str, int] = {}  # uci -> White-POV centipawns for restricted searches; tests set it
+ROOT_SCORES: dict[str, int | tuple[str, int]] = {}  # uci -> White-POV centipawns, or ("mate", n); tests set it
+
+
+def _root_score(uci: str) -> chess.engine.Score:
+    v = ROOT_SCORES.get(uci, 0)
+    return chess.engine.Mate(v[1]) if isinstance(v, tuple) else chess.engine.Cp(v)
 ROOT_REPLIES: dict[str, str] = {}  # uci -> the reply in that move's line (reveals transpositions)
 
 
@@ -41,9 +46,9 @@ class FakeEngine:
         if root_moves:
             assert multipv == len(root_moves)  # every root move must get its own line
             self.probes.append((len(board.move_stack), [m.uci() for m in root_moves], limit))
-            lines = sorted(root_moves, key=lambda m: -ROOT_SCORES.get(m.uci(), 0))
+            lines = sorted(root_moves, key=lambda m: _root_score(m.uci()), reverse=True)
             lines = lines[: len(lines) - self.drop_probe_lines]
-            return [{"score": chess.engine.PovScore(chess.engine.Cp(ROOT_SCORES.get(m.uci(), 0)), chess.WHITE),
+            return [{"score": chess.engine.PovScore(_root_score(m.uci()), chess.WHITE),
                      "pv": [m] + ([chess.Move.from_uci(ROOT_REPLIES[m.uci()])] if m.uci() in ROOT_REPLIES else [])}
                     for m in lines]
         self.calls.append((len(board.move_stack), board.root().fen(), game))
@@ -295,18 +300,26 @@ def test_probes_cover_the_queen_question_and_every_legal_move(conn, monkeypatch)
 
 
 def test_unique_best_and_better_than_queen(conn, monkeypatch):
-    a = underpromotion_analysis(conn, monkeypatch, {"a7a8n": 50, "a7a8q": 20})["w"]
+    a = underpromotion_analysis(conn, monkeypatch, {"a7a8n": 300, "a7a8q": 20})["w"]
     assert (a["is_best_move"], a["unique_best_move"], a["tied_for_best_move"], a["played_move_rank"]) == (True, True, False, 1)
     assert (a["better_than_queen"], a["vs_queen"]["evaluation"], a["vs_queen"]["queen_promotion_evaluation"]) == (
-        True, {"cp": 50}, {"cp": 20})
+        True, {"cp": 300}, {"cp": 20})
     assert a["all_moves"]["best_moves"] == ["a7a8n"] and a["all_moves"]["scored"] == a["all_moves"]["legal_moves"] == 9
 
 
 def test_a_better_move_outside_the_queen_comparison_means_not_best(conn, monkeypatch):
     # Beats queening, but a quiet king move (never in the vs_queen search) scores higher: not the best move.
-    a = underpromotion_analysis(conn, monkeypatch, {"a7a8n": 50, "a7a8q": 20, "e1d2": 90})["w"]
+    a = underpromotion_analysis(conn, monkeypatch, {"a7a8n": 300, "a7a8q": 20, "e1d2": 600})["w"]
     assert (a["better_than_queen"], a["is_best_move"], a["unique_best_move"], a["played_move_rank"]) == (True, False, False, 2)
     assert a["all_moves"]["best_moves"] == ["e1d2"]
+
+
+def test_best_needs_a_real_margin(conn, monkeypatch):
+    # 12 centipawns at +5.5 is noise, and two forced mates are both a win whatever their length: ties.
+    a = underpromotion_analysis(conn, monkeypatch, {"a7a8n": 563, "a7a8q": 551})["w"]
+    assert (a["is_best_move"], a["tied_for_best_move"], a["unique_best_move"], a["vs_queen"]["verdict"]) == (True, True, False, "equal")
+    m = underpromotion_analysis(conn, monkeypatch, {"a7a8n": ("mate", 4), "a7a8q": ("mate", 5)})["w"]
+    assert (m["unique_best_move"], m["tied_for_best_move"], m["better_than_queen"]) == (False, True, False)
 
 
 def test_tied_for_best(conn, monkeypatch):
@@ -317,8 +330,8 @@ def test_tied_for_best(conn, monkeypatch):
 
 def test_black_scores_are_flipped(conn, monkeypatch):
     # White-POV +50 for Black's bishop promotion is the worst outcome for Black.
-    b = underpromotion_analysis(conn, monkeypatch, {"a2a1b": 50, "a2a1q": -20})["b"]
-    assert (b["is_best_move"], b["better_than_queen"], b["vs_queen"]["evaluation"]) == (False, False, {"cp": -50})
+    b = underpromotion_analysis(conn, monkeypatch, {"a2a1b": 300, "a2a1q": -20})["b"]
+    assert (b["is_best_move"], b["better_than_queen"], b["vs_queen"]["evaluation"]) == (False, False, {"cp": -300})
 
 
 def test_incomplete_all_moves_search_claims_nothing(conn, monkeypatch):
@@ -364,8 +377,10 @@ def test_stockfish_knight_fork_underpromotion_beats_queening(conn):
 
 
 @needs_stockfish
-def test_stockfish_saavedra_rook_underpromotion_is_the_unique_best_move(conn):
-    # A cheap unrestricted search prefers Kd3 here; scoring every legal move finds g8=R mates in 2.
+def test_stockfish_saavedra_rook_underpromotion_is_best_and_beats_queening(conn):
+    # A cheap unrestricted search prefers Kd3 here; scoring every legal move finds g8=R mates in 2, where
+    # g8=Q stalemates. Without Black's rook, quiet king moves still force mate too, so the rook is tied for
+    # best rather than the only winning move: two forced mates are both a win.
     from chesstrove import insights
 
     saavedra = '[White "a"]\n[Black "b"]\n[Result "*"]\n[SetUp "1"]\n[FEN "8/6P1/8/8/8/8/2K5/k7 w - - 0 1"]\n\n1. g8=R *\n'
@@ -373,7 +388,7 @@ def test_stockfish_saavedra_rook_underpromotion_is_the_unique_best_move(conn):
     engine.run(conn, EngineSettings(limit_value=20_000))
     [e] = insights.annotate(conn, db.list_events(conn, type="UNDERPROMOTION"))
     a = e["engine_analysis"]
-    assert (a["is_best_move"], a["unique_best_move"], a["better_than_queen"]) == (True, True, True)
+    assert (a["is_best_move"], a["better_than_queen"]) == (True, True)
     assert a["all_moves"]["evaluation"] == {"mate": 2} and a["vs_queen"]["queen_promotion_evaluation"] == {"cp": 0}
 
 
@@ -383,7 +398,7 @@ DOOMED_PROMOTION = '[White "alice"]\n[Black "bob"]\n[Result "*"]\n[SetUp "1"]\n[
 
 def test_promotions_that_transpose_are_equal_whatever_the_noise(conn, monkeypatch):
     # The rook line scores 0.30 higher, but after ...Rxb8 both lines reach the identical position.
-    a = underpromotion_analysis(conn, monkeypatch, {"b7b8r": 50, "b7b8q": 20}, pgn=DOOMED_PROMOTION,
+    a = underpromotion_analysis(conn, monkeypatch, {"b7b8r": 300, "b7b8q": 20}, pgn=DOOMED_PROMOTION,
                                 replies={"b7b8r": "a8b8", "b7b8q": "a8b8"})["w"]
     assert (a["better_than_queen"], a["vs_queen"]["transposes_with_queen"]) == (False, True)
     assert (a["is_best_move"], a["tied_for_best_move"], a["unique_best_move"]) == (True, True, False)
@@ -403,13 +418,13 @@ def test_promoted_piece_taken_by_different_pieces_is_still_equal(conn, monkeypat
 
 
 def test_promotion_not_captured_in_one_line_is_not_equal(conn, monkeypatch):
-    a = underpromotion_analysis(conn, monkeypatch, {"b7b8r": 50, "b7b8q": 20}, pgn=TWO_CAPTURERS,
+    a = underpromotion_analysis(conn, monkeypatch, {"b7b8r": 300, "b7b8q": 20}, pgn=TWO_CAPTURERS,
                                 replies={"b7b8r": "a8b8", "b7b8q": "c7d7"})["w"]
     assert (a["vs_queen"]["transposes_with_queen"], a["better_than_queen"]) == (False, True)
 
 
 def test_different_replies_do_not_transpose(conn, monkeypatch):
-    a = underpromotion_analysis(conn, monkeypatch, {"b7b8r": 50, "b7b8q": 20}, pgn=DOOMED_PROMOTION,
+    a = underpromotion_analysis(conn, monkeypatch, {"b7b8r": 300, "b7b8q": 20}, pgn=DOOMED_PROMOTION,
                                 replies={"b7b8r": "a8b8", "b7b8q": "e8e7"})["w"]
     assert (a["better_than_queen"], a["vs_queen"]["transposes_with_queen"], a["unique_best_move"]) == (True, False, True)
 

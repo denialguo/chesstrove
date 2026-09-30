@@ -14,7 +14,7 @@ import { UciEngine } from "./uci";
 export interface UpVerdict { key: string; mine: boolean; best: BestMove; rank: number | null; legal: number }
 
 const PROBE = { nodes_per_line: 1_000_000, max_depth: 30, mate_depth: 20 }; // as the full analysis (runner.ts)
-const prefix = (platform: string, user: string) => playerKey(`${CONFIG}|upcheck-v1`, platform, user);
+const prefix = (platform: string, user: string) => playerKey(`${CONFIG}|upcheck-v2`, platform, user);
 
 function legalMoves(fen: string): number {
   const pos = Chess.fromSetup(parseFen(fen).unwrap()).unwrap();

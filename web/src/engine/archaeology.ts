@@ -314,8 +314,13 @@ function transpositionKeys(fenBefore: string, lines: ProbeLine[]): Record<string
 
 export type BestMove = "unique_best" | "tied_best" | "not_best" | "unknown";
 
+/** Moves within this much expected score of each other tie (insights.BEST_MARGIN): +5.6 vs +5.5 is noise,
+ * and two forced mates are both a win whatever their length. */
+export const BEST_MARGIN = 0.1;
+
 /** Was `played` the best of all `legal` moves, from an all_moves probe (insights._best_move_verdict)?
- * Only when every legal move got a score; moves that transpose into the same position tie. */
+ * Only when every legal move got a score; moves that transpose into the same position tie, and so do
+ * moves within BEST_MARGIN of the top. The rank is the engine's raw order. */
 export function bestMoveVerdict(fenBefore: string, played: string, color: Color, legal: number, am: Probe | undefined):
     { best: BestMove; rank: number | null; bestMoves: string[] } {
   if (!am || am.results.length !== legal || !am.results.some((l) => l.uci === played)) return { best: "unknown", rank: null, bestMoves: [] };
@@ -324,9 +329,11 @@ export function bestMoveVerdict(fenBefore: string, played: string, color: Color,
   const cls: Record<string, number> = {};
   for (const [u, sc] of Object.entries(raw)) cls[k[u]] = Math.max(cls[k[u]] ?? -Infinity, sc);
   const scores = Object.fromEntries(Object.keys(raw).map((u) => [u, cls[k[u]]]));
-  const top = Math.max(...Object.values(scores));
-  const bestMoves = Object.keys(scores).filter((u) => scores[u] === top).sort();
-  return { best: scores[played] === top ? (bestMoves.length === 1 ? "unique_best" : "tied_best") : "not_best",
+  const expOf: Record<string, number> = {};
+  for (const l of am.results) expOf[k[l.uci]] = Math.max(expOf[k[l.uci]] ?? 0, lineExp(l, color));
+  const topExp = Math.max(...Object.values(expOf));
+  const bestMoves = Object.keys(scores).filter((u) => expOf[k[u]] >= topExp - BEST_MARGIN).sort();
+  return { best: bestMoves.includes(played) ? (bestMoves.length === 1 ? "unique_best" : "tied_best") : "not_best",
            rank: 1 + Object.values(scores).filter((sc) => sc > scores[played]).length, bestMoves };
 }
 
@@ -343,12 +350,12 @@ function underpromotion(games: Analysed, limit: number): Discovery[] {
       let vsQueen = "unknown";
       const vq = r.probes[`${ply - 1}:vs_queen`];
       if (vq) {
-        const s = Object.fromEntries(vq.results.map((l) => [l.uci, lineOrd(l, g.color)]));
+        const e = Object.fromEntries(vq.results.map((l) => [l.uci, lineExp(l, g.color)]));
         const queen = played.slice(0, 4) + "q";
-        if (played in s && queen in s) {
+        if (played in e && queen in e) {
           const k = keys(vq.results);
-          const transposes = k[played] === k[queen];
-          vsQueen = !transposes && s[played] > s[queen] ? "better" : transposes || s[played] === s[queen] ? "equal" : "worse";
+          const gap = e[played] - e[queen];
+          vsQueen = k[played] === k[queen] || Math.abs(gap) < BEST_MARGIN ? "equal" : gap > 0 ? "better" : "worse";
         }
       }
       const legal = g.legal[ply - 1];

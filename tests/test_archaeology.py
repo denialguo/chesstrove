@@ -259,13 +259,13 @@ def test_underpromotion_keeps_best_move_and_queen_comparison_apart(conn):
     fen = "8/P1k5/8/8/8/8/8/4K3 w - - 0 1"
     legal = ["a7a8q", "a7a8r", "a7a8b", "a7a8n", "e1d1", "e1d2", "e1e2", "e1f1", "e1f2"]
     line = lambda u, cp: {"uci": u, "score_cp": cp, "mate": None, "wdl": None, "depth": 12, "pv": [u]}  # noqa: E731
-    all_moves = Probe(0, "all_moves", tuple(legal), tuple(line(u, 90 if u == "a7a8n" else 0) for u in legal), {"depth": 12})
-    vs_queen = Probe(0, "vs_queen", ("a7a8n", "a7a8q"), (line("a7a8n", 90), line("a7a8q", 0)), {"depth": 12})
+    all_moves = Probe(0, "all_moves", tuple(legal), tuple(line(u, 300 if u == "a7a8n" else 0) for u in legal), {"depth": 12})
+    vs_queen = Probe(0, "vs_queen", ("a7a8n", "a7a8q"), (line("a7a8n", 300), line("a7a8q", 0)), {"depth": 12})
     g = game(conn, "1. a8=N+", fen=fen, probes=[all_moves, vs_queen])
     [r] = found(conn, "underpromotion")
     assert (r["game"]["id"], r["best_move"], r["vs_queen"], r["played_move_rank"]) == (g, "unique_best", "better", 1)
     assert r["best_moves"] == [{"uci": "a7a8n", "san": "a8=N+"}]
-    assert r["queen_promotion_evaluation"] == {"cp": 0} and r["evaluation"] == {"cp": 90}
+    assert r["queen_promotion_evaluation"] == {"cp": 0} and r["evaluation"] == {"cp": 300}
 
 
 def test_unknown_type_is_an_error(conn):

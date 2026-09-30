@@ -273,9 +273,7 @@ def underpromotion(conn, q, p, config):
         best = ("unknown" if a.get("is_best_move") is None else "unique_best" if a["unique_best_move"]
                 else "tied_best" if a["tied_for_best_move"] else "not_best")
         vq = a.get("vs_queen")
-        vs_queen = ("unknown" if vq is None else "better" if a["better_than_queen"]
-                    else "equal" if vq["transposes_with_queen"] or vq["evaluation"] == vq["queen_promotion_evaluation"]
-                    else "worse")
+        vs_queen = "unknown" if vq is None else vq["verdict"]
         fen_before = _fen_before(conn, e["game_id"], e["ply"])
         am = a.get("all_moves") or {}
         out.append({
